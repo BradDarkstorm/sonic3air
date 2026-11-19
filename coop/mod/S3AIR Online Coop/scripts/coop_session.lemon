@@ -43,6 +43,9 @@ function void Coop.sessionUpdate()
 	Coop.processMessages()
 	Coop.stageUpdate()
 	Coop.playersUpdate()
+	Coop.enemiesUpdate()
+	Coop.teleportUpdate()
+	Coop.bossesUpdate()
 
 	Coop.drawStatus()
 }
@@ -76,6 +79,30 @@ function void Coop.processMessages()
 		{
 			Coop.onPaletteMessage(sender, size)
 		}
+		else if (msgType == MSG_ENEMIES)
+		{
+			Coop.onEnemiesMessage(sender, size)
+		}
+		else if (msgType == MSG_ENEMIES_REQUEST)
+		{
+			Coop.onEnemiesRequestMessage(sender, size)
+		}
+		else if (msgType == MSG_BOSS_HIT)
+		{
+			Coop.onBossHitMessage(sender, size)
+		}
+		else if (msgType == MSG_BOSS_QUERY)
+		{
+			Coop.onBossQueryMessage(sender, size)
+		}
+		else if (msgType == MSG_BOSS_BACKLOG)
+		{
+			Coop.onBossBacklogMessage(sender, size)
+		}
+		else if (msgType == MSG_BOSS_ARRIVED)
+		{
+			Coop.onBossArrivedMessage(sender, size)
+		}
 		// Unknown types are ignored, so newer hosts can add features without breaking older message handling
 	}
 }
@@ -108,8 +135,11 @@ function void Coop.drawStatus()
 	}
 	else
 	{
-		text = stringformat("CO-OP: %s", Net.getStatusText())
+		// Status text comes from the engine, so it can't go through "stringformat" -- draw it as separate text
+		text = "CO-OP: "
 		color = 0xff8080ff
+		s32 width = Renderer.getTextWidth("oxyfont_tiny:gradient:outline(0x000000ff,1,false)", text)
+		Renderer.drawText("oxyfont_tiny:gradient:outline(0x000000ff,1,false)", 4 + width, 4, Net.getStatusText(), color, 1, 0, 0xf000, false)
 	}
 
 	Renderer.drawText("oxyfont_tiny:gradient:outline(0x000000ff,1,false)", 4, 4, text, color, 1, 0, 0xf000, false)
@@ -124,7 +154,11 @@ function void Coop.drawStatus()
 				continue
 
 			string marker = (id == Net.getLocalPlayerId()) ? "> " : "  "
-			Renderer.drawText("oxyfont_tiny:gradient:outline(0x000000ff,1,false)", 4, py, stringformat("%sP%d %s", marker, id + 1, Net.getPlayerName(id)), 0xffffffff, 1, 0, 0xf000, false)
+			string label = stringformat("%sP%d ", marker, id + 1)
+			Renderer.drawText("oxyfont_tiny:gradient:outline(0x000000ff,1,false)", 4, py, label, 0xffffffff, 1, 0, 0xf000, false)
+			// Player names come from the network, so they can't go through "stringformat" -- draw them as separate text
+			s32 labelWidth = Renderer.getTextWidth("oxyfont_tiny:gradient:outline(0x000000ff,1,false)", label)
+			Renderer.drawText("oxyfont_tiny:gradient:outline(0x000000ff,1,false)", 4 + labelWidth, py, Net.getPlayerName(id), 0xffffffff, 1, 0, 0xf000, false)
 			py += 9
 		}
 	}

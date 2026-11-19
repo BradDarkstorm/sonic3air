@@ -1,0 +1,164 @@
+//-------------------------------------------------------//
+// Online Co-op: teleport to another player              //
+//-------------------------------------------------------//
+
+// How it works:
+//  - While paused, a small co-op panel is shown below the game's pause menu: "< TELEPORT TO: name >".
+//    Left / right picks a player (the pause menu itself only uses up / down). Choosing "Continue" goes there.
+//  - The jump uses the game's own "restart at checkpoint" with a temporary checkpoint at the other player's spot,
+//    so the level gets loaded and drawn properly around the new position. Rings and time are kept.
+
+global u8   Coop.tp.target			// Player ID to teleport to, or 0xff for none
+global bool Coop.tp.wasPaused
+global bool Coop.tp.pendingRestore
+global u16  Coop.tp.savedRings
+global u32  Coop.tp.savedTime
+global u8   Coop.tp.savedLivesGranted
+
+constant string COOP_TP_FONT = "oxyfont_small:gradient:outline(0x000000ff,1,false):shadow(1,1,0.5f,0.8f)"
+
+
+function void Coop.teleportUpdate()
+{
+	// After a teleport: put back rings and time once the level is running again
+	if (Coop.tp.pendingRestore && Coop.isInLevel())
+	{
+		Coop.tp.pendingRestore = false
+		ring_counter = Coop.tp.savedRings
+		hud.dirty.rings = 0x80
+		timer.alldata = Coop.tp.savedTime
+		extra_lives_granted = Coop.tp.savedLivesGranted
+	}
+
+	bool paused = global.game.paused && global.game_mode == 0x0c && global.stage_type == 0 && !competition_mode.active
+	if (paused && !Coop.tp.wasPaused)
+	{
+		// Pause just started
+		Coop.tp.target = 0xff
+	}
+	Coop.tp.wasPaused = paused
+	if (!paused || !Net.isOnline() || GamePause.isDialogOpen)
+		return
+
+	// Pick target with left / right; cycles through "stay here" and every player in the same stage
+	if (Input.buttonPressed(BUTTON_LEFT) || Input.buttonPressed(BUTTON_RIGHT))
+	{
+		s8 direction = Input.buttonPressed(BUTTON_RIGHT) ? 1 : -1
+		u8 current = (Coop.tp.target == 0xff) ? COOP_MAX_PLAYERS : Coop.tp.target
+		for (u8 step = 0; step <= COOP_MAX_PLAYERS; ++step)
+		{
+			current = u8((s16(current) + direction + COOP_MAX_PLAYERS + 1) % (COOP_MAX_PLAYERS + 1))
+			if (current == COOP_MAX_PLAYERS || Coop.canTeleportTo(current))
+				break
+		}
+		Coop.tp.target = (current == COOP_MAX_PLAYERS) ? 0xff : current
+		Audio.playAudio(0x5b)
+	}
+
+	// Target may have left or changed stage in the meantime
+	if (Coop.tp.target != 0xff && !Coop.canTeleportTo(Coop.tp.target))
+		Coop.tp.target = 0xff
+
+	// Panel below the pause menu (only if there's anyone to teleport to)
+	bool anyone = false
+	for (u8 id = 0; id < COOP_MAX_PLAYERS; ++id)
+		anyone |= Coop.canTeleportTo(id)
+	if (!anyone)
+		return
+
+	s32 px = getScreenWidth() / 2
+	s32 py = getScreenHeight() - 30
+	Renderer.drawRect(px - 110, py - 9, 220, 28, 0x00000080, 0xfe00, false)
+	if (Coop.tp.target == 0xff)
+	{
+		Renderer.drawText(COOP_TP_FONT, px, py, "<  TELEPORT: STAY HERE  >", 0xc0c0c0ff, 5, 0, 0xfe10, false)
+	}
+	else
+	{
+		// Player names come from the network, so they can't go through "stringformat" -- draw them as separate text
+		string name = Net.getPlayerName(Coop.tp.target)
+		string prefix = "<  TELEPORT TO: "
+		string suffix = "  >"
+		s32 widthPrefix = Renderer.getTextWidth(COOP_TP_FONT, prefix)
+		s32 widthName = Renderer.getTextWidth(COOP_TP_FONT, name)
+		s32 widthSuffix = Renderer.getTextWidth(COOP_TP_FONT, suffix)
+		s32 x = px - (widthPrefix + widthName + widthSuffix) / 2
+		Renderer.drawText(COOP_TP_FONT, x, py, prefix, 0xffff60ff, 4, 0, 0xfe10, false)
+		Renderer.drawText(COOP_TP_FONT, x + widthPrefix, py, name, 0xffffffff, 4, 0, 0xfe10, false)
+		Renderer.drawText(COOP_TP_FONT, x + widthPrefix + widthName, py, suffix, 0xffff60ff, 4, 0, 0xfe10, false)
+	}
+	if (Coop.tp.target != 0xff)
+		Renderer.drawText("oxyfont_tiny:gradient:outline(0x000000ff,1,false)", px, py + 11, "SELECT CONTINUE TO GO", 0xffffffff, 5, 0, 0xfe10, false)
+}
+
+
+function bool Coop.canTeleportTo(u8 id)
+{
+	if (id >= COOP_MAX_PLAYERS || id == Net.getLocalPlayerId() || !Net.isPlayerConnected(id))
+		return false
+
+	u32 block = Coop.getPlayerBlock(id)
+	if (u8[block] == 0 || u16[block + 2] > 60)
+		return false		// No recent data
+
+	u32 data = block + 0x10
+	if (u16[data + 0x02] != global.zone_act.apparent)
+		return false
+
+	// Both need to be on the same side of a seamless act transition (same actual level layout)
+	bool otherActTrans = (u8[data + 0x0c] & PRESENCE_FLAG_ACT_TRANS) != 0
+	bool ownActTrans = (global.zone_act != global.zone_act.apparent)
+	return (otherActTrans == ownActTrans)
+}
+
+
+// Called by the game when the pause menu closes -- we add our part and pass it on
+function void Standalone.onResumeAfterPause()
+{
+	base.Standalone.onResumeAfterPause()
+
+	u8 target = Coop.tp.target
+	Coop.tp.target = 0xff
+	if (target == 0xff)
+		return
+
+	// Only when "Continue" was chosen (restart / exit set their own things up)
+	if (level.restart != 0 || global.game_mode != 0x0c || global.stage_type != 0)
+		return
+	if (!Coop.canTeleportTo(target))
+		return
+
+	Coop.teleportTo(target)
+}
+
+
+function void Coop.teleportTo(u8 id)
+{
+	u32 data = Coop.getPlayerBlock(id) + 0x10
+	Coop.teleportToPosition(u16[data + 0x04], u16[data + 0x06], u16[data + 0x10], u16[data + 0x12])
+}
+
+
+function void Coop.teleportToPosition(u16 targetX, u16 targetY, u16 layerFlags, u16 spriteAttr)
+{
+	// Keep rings, time and extra-life progress
+	Coop.tp.savedRings = ring_counter
+	Coop.tp.savedTime = timer.alldata
+	Coop.tp.savedLivesGranted = extra_lives_granted
+	Coop.tp.pendingRestore = true
+
+	// Temporary checkpoint at the other player's position
+	//  -> Same as what a starpost does, see "Checkpoint.SaveCurrentState"
+	if (checkpoint.number == 0)
+		checkpoint.number = 1
+	Checkpoint.SaveCurrentState()
+	checkpoint.x = targetX
+	checkpoint.y = targetY
+	checkpoint.layer_flags = layerFlags
+	checkpoint.sprite_attr = spriteAttr
+	checkpoint.camera.x = u16(max(s32(targetX) - s32(getScreenWidth() / 2), 0))
+	checkpoint.camera.y = u16(max(s32(targetY) - 0x60, 0))
+
+	// Same as the pause menu's "Restart at checkpoint"
+	restartAtCheckpoint()
+}

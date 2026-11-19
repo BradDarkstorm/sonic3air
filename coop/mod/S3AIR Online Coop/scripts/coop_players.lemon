@@ -13,6 +13,8 @@
 global u8   Coop.players.sendCounter
 global u32  Coop.players.tailsTailsAddress		// Cached address of player 1's Tails' tails object
 global bool Coop.players.captureActive
+global u8   Coop.players.captureCount		// Number of own sprites captured last frame
+global u16  Coop.players.emptyCaptures		// Consecutive frames without any captured sprites
 
 
 function void Coop.playersUpdate()
@@ -53,12 +55,25 @@ function void Coop.playersUpdate()
 	Net.setCaptureTag(1, tailsAddress)
 	Coop.players.captureActive = true
 
+	// What did our game draw for our character last frame?
+	//  -> While paused, the game doesn't redraw anything, so keep sending as visible and don't replace the last sprites
+	bool paused = (global.game.paused != 0)
+	if (!paused)
+	{
+		Coop.players.captureCount = Net.getCapturedSprites(COOP_MEM_SEND2 + 4, MAX_SPRITES)
+		if (Coop.players.captureCount == 0)
+			Coop.players.emptyCaptures = min(Coop.players.emptyCaptures + 1, 1000)
+		else
+			Coop.players.emptyCaptures = 0
+	}
+
 	// Send own state every 2nd frame (30 per second), palette every 8th frame
 	++Coop.players.sendCounter
 	if ((Coop.players.sendCounter & 1) == 0)
 	{
 		Coop.sendPresence()
-		Coop.sendSprites()
+		if (!paused)
+			Coop.sendSprites()
 	}
 	if ((Coop.players.sendCounter & 7) == 0)
 	{
@@ -97,9 +112,22 @@ function void Coop.sendPresence()
 	if (char.flags & char.flag.FACING_LEFT)
 		flags |= PRESENCE_FLAG_FACING_LEFT
 
-	// Hidden while blinking after a hit (same rule the game uses)
-	bool blinkHidden = (u8[A0 + 0x34] != 0 && ((u8[A0 + 0x34] + 1) & 0x04) == 0)
-	if (!blinkHidden && (char.render_flags & 0x80))		// 0x80 = "on screen" / visible render flag
+	// Visible = our game actually drew the character last frame (so blinking after a hit matches exactly)
+	//  -> If sprite capture doesn't seem to work at all (nothing captured for a while), fall back to the blink timer
+	bool visible
+	if (global.game.paused != 0)
+	{
+		visible = true
+	}
+	else if (Coop.players.emptyCaptures < 30)
+	{
+		visible = (Coop.players.captureCount > 0)
+	}
+	else
+	{
+		visible = (u8[A0 + 0x34] == 0 || ((u8[A0 + 0x34] + 1) & 0x04) != 0)
+	}
+	if (visible)
 		flags |= PRESENCE_FLAG_VISIBLE
 	u8[msg + 0x0c] = flags
 
@@ -115,8 +143,12 @@ function void Coop.sendPresence()
 			u8[msg + 0x0e] = lookupAngleByVector(char.velocity.x, char.velocity.y)
 		}
 	}
-	u8[msg + 0x0f] = 0
-	u32[msg + 0x10] = 0
+	if (u8[0xffffb005] >= base_state.DIED)
+		flags |= PRESENCE_FLAG_DEAD
+	u8[msg + 0x0c] = flags
+	u8[msg + 0x0f] = (level.boss_encounter != 0) ? PRESENCE_FLAG2_IN_BOSS : 0
+	u16[msg + 0x10] = u16[0xffffb046]		// Collision layer
+	u16[msg + 0x12] = char.sprite_attributes
 
 	Net.send(NET_TARGET_ALL, msg, PRESENCE_SIZE, false)
 }
@@ -124,8 +156,9 @@ function void Coop.sendPresence()
 
 function void Coop.sendSprites()
 {
+	// Sprites were already written to the buffer this frame, see "Coop.playersUpdate"
 	u32 msg = COOP_MEM_SEND2
-	u8 count = Net.getCapturedSprites(msg + 4, MAX_SPRITES)
+	u8 count = Coop.players.captureCount
 	u8[msg + 0] = MSG_SPRITES
 	u8[msg + 1] = count
 	u16[msg + 2] = 0
@@ -177,6 +210,7 @@ function void Coop.onPresenceMessage(u8 sender, u16 size)
 		// New player: no sprites or palette yet
 		u8[block + 4] = 0
 		u8[block + 5] = 0
+		u8[block + 7] = 0
 	}
 	copyMemory(block + 0x10, COOP_MEM_RECV, PRESENCE_SIZE)
 	u8[block] = 1
@@ -196,6 +230,8 @@ function void Coop.onSpritesMessage(u8 sender, u16 size)
 	u32 block = Coop.getPlayerBlock(sender)
 	copyMemory(block + 0x80, COOP_MEM_RECV + 4, u32(count) * 0x20)
 	u8[block + 4] = count
+	if (count > 0)
+		u8[block + 7] = 1		// Sprite capture works for this player
 }
 
 
@@ -360,8 +396,31 @@ function void Coop.drawRemotePlayer(u8 id, s32 px, s32 py, u8 alpha, s32 scale)
 
 	// Replay the exact sprites the sender drew, if we have them
 	u8 count = u8[block + 4]
-	u8 drawn = 0
+
+	// Original character sprites are built from the ROM on first use, so a sprite the sender drew may not exist here yet
+	//  -> Build the ones the sender could be using now, so their keys exist too (keys from the ROM are the same on every PC)
+	u8 missing = 0
 	for (u8 i = 0; i < count; ++i)
+	{
+		if (!Renderer.hasCustomSprite(u64[block + 0x80 + u32(i) * 0x20]))
+			++missing
+	}
+	if (missing > 0)
+	{
+		Coop.prepareOriginalSprites(data)
+		missing = 0
+		for (u8 i = 0; i < count; ++i)
+		{
+			if (!Renderer.hasCustomSprite(u64[block + 0x80 + u32(i) * 0x20]))
+				++missing
+		}
+	}
+
+	// If most of it is missing (e.g. we don't have the sender's character mod), draw the original character instead
+	bool replay = (count > 0 && missing * 2 < count)
+
+	u8 drawn = 0
+	for (u8 i = 0; replay && i < count; ++i)
 	{
 		u32 sprite = block + 0x80 + u32(i) * 0x20
 		u64 key = u64[sprite]
@@ -383,9 +442,28 @@ function void Coop.drawRemotePlayer(u8 id, s32 px, s32 py, u8 alpha, s32 scale)
 		tint = (tint & 0xffffff00) | ((tint & 0xff) * u32(alpha) / 0xff)
 		u16 renderQueue = (scale == 0x100) ? (u16[sprite + 0x10] - 1 - u16(id)) : (0xa800 + i)
 
-		Renderer.drawSpriteTransformed(key, px + dx, py + dy, atex, u8[sprite + 0x0e], renderQueue, tint, m11, m12, m21, m22)
+		if (scale == 0x100)
+		{
+			// Normal size: exact replay incl. rotation, scaling and flipping
+			Renderer.drawSpriteTransformed(key, px + dx, py + dy, atex, u8[sprite + 0x0e], renderQueue, tint, m11, m12, m21, m22)
+		}
+		else
+		{
+			// Off-screen marker: same drawing path as the game's own off-screen Tails marker (no rotation, just flipping),
+			// always in front of the level
+			u8 markerFlags = SPRITE_FLAG_PRIO
+			if (s16[sprite + 0x12] < 0)
+				markerFlags |= SPRITE_FLAG_FLIP_X
+			if (s16[sprite + 0x18] < 0)
+				markerFlags |= SPRITE_FLAG_FLIP_Y
+			Renderer.drawCustomSprite(key, px + dx, py + dy, u8(atex), markerFlags, renderQueue, 0, tint, scale * 0x100)
+		}
 		++drawn
 	}
+
+	// Sender drew nothing (e.g. blinking) -> draw nothing as well, instead of falling back to the original character
+	if (count == 0 && u8[block + 7] != 0)
+		return
 
 	if (drawn == 0)
 	{
@@ -394,6 +472,44 @@ function void Coop.drawRemotePlayer(u8 id, s32 px, s32 py, u8 alpha, s32 scale)
 		u16 renderQueue = (scale == 0x100) ? (0x9f00 - u16(id) * 2) : 0xa800
 		Coop.drawOriginalCharacter(data, px, py, alpha, scale * 0x100, renderQueue, atex)
 	}
+}
+
+
+// Builds the original (ROM) sprites a remote player could currently be shown with: their animation frame,
+// the frame as remapped for smooth rotation, and Tails' tails
+function void Coop.prepareOriginalSprites(u32 data)
+{
+	u8 character = u8[data + 0x01]
+	if (character > CHARACTER_KNUCKLES)
+		return
+
+	bool isSuper = (u8[data + 0x0c] & PRESENCE_FLAG_SUPER) != 0
+	u8 animationSprite = u8[data + 0x0a]
+	Coop.setupOriginalCharacterSprite(character, animationSprite, isSuper)
+	Coop.setupOriginalCharacterSprite(character, animationSprite, !isSuper)
+
+	if (animationSprite >= 0x01 && animationSprite <= 0x20)
+		Coop.setupOriginalCharacterSprite(character, 0x01 + (animationSprite - 0x01) % 8, isSuper)
+	else if (animationSprite >= 0x21 && animationSprite <= 0x30)
+		Coop.setupOriginalCharacterSprite(character, 0x21 + (animationSprite - 0x21) % 4, isSuper)
+	else if (character == CHARACTER_TAILS && animationSprite >= 0xc3 && animationSprite <= 0xca)
+		Coop.setupOriginalCharacterSprite(character, 0xc3 + (animationSprite - 0xc3) % 2, isSuper)
+
+	u8 tailsSprite = u8[data + 0x0d]
+	if (character == CHARACTER_TAILS && tailsSprite != 0)
+	{
+		Renderer.setupCustomCharacterSprite(0x336620, 0x344d74, 0x344bb8, tailsSprite, 0x00)
+		if (tailsSprite >= 0x05 && tailsSprite <= 0x14)
+			Renderer.setupCustomCharacterSprite(0x336620, 0x344d74, 0x344bb8, 0x05 + (tailsSprite - 0x05) % 4, 0x00)
+	}
+}
+
+function u64 Coop.setupOriginalCharacterSprite(u8 character, u8 animationSprite, bool isSuper)
+{
+	u32 sourceBase    = (character == CHARACTER_SONIC) ? ((animationSprite >= 0xda) ? 0x140060 : 0x100000) : (character == CHARACTER_TAILS) ? ((animationSprite >= 0xd1) ? 0x143d00 : 0x3200e0) : 0x1200e0
+	u32 tableAddress  = (character == CHARACTER_SONIC) ? (isSuper ? 0x148378 : 0x148182) : (character == CHARACTER_TAILS) ? 0x14a08a : 0x14bd0a
+	u32 mappingOffset = (character == CHARACTER_SONIC) ? (isSuper ? 0x146816 : 0x146620) : (character == CHARACTER_TAILS) ? 0x148eb8 : 0x14a8d6
+	return Renderer.setupCustomCharacterSprite(sourceBase, tableAddress, mappingOffset, animationSprite, 0x00)
 }
 
 
@@ -437,7 +553,7 @@ function void Coop.drawOriginalCharacter(u32 data, s32 px, s32 py, u8 alpha, s32
 		}
 	}
 
-	if (flags & PRESENCE_FLAG_PRIORITY)
+	if ((flags & PRESENCE_FLAG_PRIORITY) || scale != 0x10000)		// Off-screen markers always go in front of the level
 		spriteFlags |= SPRITE_FLAG_PRIO
 
 	// Original sprites only, built straight from the ROM, so the viewer's own character mods don't apply
@@ -451,10 +567,7 @@ function void Coop.drawOriginalCharacter(u32 data, s32 px, s32 py, u8 alpha, s32
 	}
 	else
 	{
-		u32 sourceBase    = (character == CHARACTER_SONIC) ? ((animationSprite >= 0xda) ? 0x140060 : 0x100000) : (character == CHARACTER_TAILS) ? ((animationSprite >= 0xd1) ? 0x143d00 : 0x3200e0) : 0x1200e0
-		u32 tableAddress  = (character == CHARACTER_SONIC) ? (isSuper ? 0x148378 : 0x148182) : (character == CHARACTER_TAILS) ? 0x14a08a : 0x14bd0a
-		u32 mappingOffset = (character == CHARACTER_SONIC) ? (isSuper ? 0x146816 : 0x146620) : (character == CHARACTER_TAILS) ? 0x148eb8 : 0x14a8d6
-		key = Renderer.setupCustomCharacterSprite(sourceBase, tableAddress, mappingOffset, animationSprite, 0x00)
+		key = Coop.setupOriginalCharacterSprite(character, animationSprite, isSuper)
 	}
 
 	u32 tint = 0xffffff00 | u32(alpha)		// RGBA
@@ -476,7 +589,7 @@ function void Coop.drawOriginalCharacter(u32 data, s32 px, s32 py, u8 alpha, s32
 				tailsAngle += 0x80
 			}
 		}
-		if (flags & PRESENCE_FLAG_PRIORITY)
+		if ((flags & PRESENCE_FLAG_PRIORITY) || scale != 0x10000)
 			tailsFlags |= SPRITE_FLAG_PRIO
 
 		u64 tailsKey = Renderer.setupCustomCharacterSprite(0x336620, 0x344d74, 0x344bb8, tailsSprite, 0x00)

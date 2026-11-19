@@ -636,8 +636,17 @@ namespace
 	uint8 Net_getNumPlayers()									{ return CoopNet::instance().getNumPlayers(); }
 	uint8 Net_getMaxPlayers()									{ return CoopNet::MAX_PLAYERS; }
 	bool Net_isPlayerConnected(uint8 id)						{ return CoopNet::instance().getPlayerInfo(id).mActive; }
-	lemon::StringRef Net_getPlayerName(uint8 id)				{ return lemon::StringRef(lemon::FlyweightString(CoopNet::instance().getPlayerInfo(id).mName)); }
-	lemon::StringRef Net_getStatusText()						{ return lemon::StringRef(lemon::FlyweightString(CoopNet::instance().getStatusText())); }
+	// Strings handed to scripts must be registered at the script runtime, as scripts only pass around their hashes
+	lemon::StringRef makeScriptString(const std::string& str)
+	{
+		lemon::Runtime* runtime = lemon::Runtime::getActiveRuntime();
+		if (nullptr == runtime)
+			return lemon::StringRef();
+		return lemon::StringRef(runtime->addString(str));
+	}
+
+	lemon::StringRef Net_getPlayerName(uint8 id)				{ return makeScriptString(CoopNet::instance().getPlayerInfo(id).mName); }
+	lemon::StringRef Net_getStatusText()						{ return makeScriptString(CoopNet::instance().getStatusText()); }
 	uint8 Net_getConfigMode()									{ return CoopNet::instance().getConfigMode(); }
 
 	void Net_setSignature(lemon::StringRef signature)			{ if (signature.isValid()) CoopNet::instance().setSignature(signature.getString()); }

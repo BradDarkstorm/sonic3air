@@ -3,12 +3,14 @@
 //-------------------------------------------------------//
 
 // Players must run exactly the same signature to join each other; bump on any protocol change
-constant string COOP_SIGNATURE = "s3air-online-coop/0.3.0"
+constant string COOP_SIGNATURE = "s3air-online-coop/0.5.0"
 
 // Mod settings (set by the game from mod.json "Settings")
 global u8 Coop.setting.showNames = 1
 global u8 Coop.setting.showOffscreen = 1
 global u8 Coop.setting.opacity = 0
+global u8 Coop.setting.bossPull = 1		// Host's choice counts: move everyone to the boss when someone gets there
+global u8 Coop.setting.bossWait = 0		// Host's choice counts: hold the game at the boss until everyone is there
 
 
 // Engine "Net" states (see CoopNet.h)
@@ -28,8 +30,14 @@ constant u8 MSG_PRESENCE	= 0x01		// Unreliable, ~30 times per second: own charac
 constant u8 MSG_STAGE		= 0x02		// Reliable, host only: the stage everyone should be in
 constant u8 MSG_SPRITES		= 0x03		// Unreliable, with each presence: the exact sprites drawn for the own character
 constant u8 MSG_PALETTE		= 0x04		// Unreliable, a few times per second: the own character's 32 palette colors
+constant u8 MSG_ENEMIES		= 0x10		// Reliable: badniks that got destroyed (one or more level layout entries)
+constant u8 MSG_ENEMIES_REQUEST	= 0x11		// Reliable, to host: "send me the destroyed badniks of this act" (when arriving in an act)
+constant u8 MSG_BOSS_HIT		= 0x20		// Reliable, to all: someone hit a boss (identified by its key, see coop_bosses)
+constant u8 MSG_BOSS_QUERY		= 0x21		// Reliable, to host: "how many hits does this boss have already?"
+constant u8 MSG_BOSS_BACKLOG	= 0x22		// Reliable, host to one player: answer to MSG_BOSS_QUERY
+constant u8 MSG_BOSS_ARRIVED	= 0x23		// Reliable, to all: someone reached a boss (with position, for pulling everyone there)
 // Reserved for upcoming features:
-//  0x10 = enemy destroyed, 0x20 = boss hit / boss state, 0x30 = special stage, 0x40 = teleport request
+//  0x30 = special stage
 
 
 // Memory layout inside the engine's shared memory, using the otherwise unused top 64 KB (0x8f0000 .. 0x8fffff)
@@ -45,6 +53,7 @@ constant u32 COOP_PLAYER_SIZE	= 0x200
 //  +0x04  u8   number of captured sprites at +0x80
 //  +0x05  u8   1 if palette at +0x40 is valid
 //  +0x06  u8   character the palette belongs to
+//  +0x07  u8   1 once we got sprites from this player (then "no sprites" means "not drawn right now")
 //  +0x10  PRESENCE_SIZE bytes: copy of the latest presence message (layout below)
 //  +0x40  0x40 bytes: the player's character palette (32 colors)
 //  +0x80  MAX_SPRITES * 0x20 bytes: captured sprites, layout as written by "Net.getCapturedSprites"
@@ -52,6 +61,21 @@ constant u8 MAX_SPRITES = 12
 
 // Palette lines 10..15 (unused by the base game) are used for up to 3 remote players' own colors, filled from line 14+15 downwards
 constant u8  COOP_PALETTE_SLOTS = 3
+
+// Destroyed badniks of the current act (own and from others), re-applied after restarts
+//  +0x00 u16 count, +0x02 u16 zone & act the list belongs to, entries from +0x10: 8 bytes each (6 bytes level layout entry, 2 bytes unused)
+constant u32 COOP_MEM_KILLS		= 0x8f2000
+constant u16 COOP_MAX_KILLS		= 400
+
+// Boss tracking per object slot (106 dynamic object slots from 0xffffb128, 0x4a bytes each), 0x10 bytes per slot:
+//  +0x00 u32 boss key (0 = not a boss), +0x04 u8 last seen hit count, +0x05 u8 hits waiting to be applied,
+//  +0x06 u8 1 if a backlog query was sent, +0x08 u32 last seen update address
+constant u32 COOP_MEM_SLOTS		= 0x8f3000
+constant u8  COOP_NUM_SLOTS		= 106
+
+// Host only: hits per boss, 0x10 bytes per entry: +0x00 u32 key, +0x04 u16 zone & act, +0x06 u8 hits
+constant u32 COOP_MEM_BOSSES	= 0x8f3800
+constant u8  COOP_MAX_BOSSES	= 16
 
 // Presence message layout (0x10 bytes):
 //  +0x00  u8   MSG_PRESENCE
@@ -65,8 +89,9 @@ constant u8  COOP_PALETTE_SLOTS = 3
 //  +0x0c  u8   flags, see PRESENCE_FLAG_*
 //  +0x0d  u8   Tails' tails animation sprite (0 = none)
 //  +0x0e  u8   Tails' tails angle
-//  +0x0f  u8   reserved
-//  +0x10  u32  reserved
+//  +0x0f  u8   more flags, see PRESENCE_FLAG2_*
+//  +0x10  u16  collision layer flags (u16[0xffffb046]), used for teleporting
+//  +0x12  u16  sprite attributes (u16[0xffffb00a]), used for teleporting
 constant u8 PRESENCE_SIZE = 0x14
 
 constant u8 PRESENCE_FLAG_FLIP_X		= 0x01
@@ -76,6 +101,13 @@ constant u8 PRESENCE_FLAG_SUPER			= 0x08
 constant u8 PRESENCE_FLAG_ACT_TRANS		= 0x10		// Apparent act differs from actual act (seamless act transitions)
 constant u8 PRESENCE_FLAG_FACING_LEFT	= 0x20
 constant u8 PRESENCE_FLAG_VISIBLE		= 0x40		// Cleared while blinking after a hit, or when the character isn't drawn
+constant u8 PRESENCE_FLAG_DEAD			= 0x80		// Died (or spectating after dying)
+
+constant u8 PRESENCE_FLAG2_IN_BOSS		= 0x01		// In a boss fight right now (level.boss_encounter)
+
+// Host settings, sent with MSG_STAGE in byte 1
+constant u8 HOST_SETTING_BOSS_PULL		= 0x01
+constant u8 HOST_SETTING_BOSS_WAIT		= 0x02
 
 
 function u32 Coop.getPlayerBlock(u8 playerId)

@@ -9,6 +9,9 @@
 	 - coop_session:  starting the session from coop.json, status display
 	 - coop_stage:    everyone follows the host's stage
 	 - coop_players:  sending own character state and drawing everyone else
+ - coop_enemies:  destroyed badniks are gone for everyone
+ - coop_teleport: teleport to another player from the pause menu
+ - coop_bosses:   shared boss health, spectating after dying, gathering at the boss
 
 	Future-proofing rules followed in this mod:
 	 - Never copy-and-edit base game functions. Only use own hook functions or
@@ -21,3 +24,6 @@ include coop_defines
 include coop_session
 include coop_stage
 include coop_players
+include coop_enemies
+include coop_teleport
+include coop_bosses

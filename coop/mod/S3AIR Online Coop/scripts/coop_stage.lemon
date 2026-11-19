@@ -11,6 +11,7 @@ global u16 Coop.stage.hostStage			// Last stage the host told us about
 global bool Coop.stage.hostStageKnown
 global u16 Coop.stage.lastFollowedStage	// Last host stage we already reacted to
 global bool Coop.stage.followedOnce
+global u8   Coop.stage.hostSettings
 
 
 function void Coop.stageUpdate()
@@ -51,7 +52,7 @@ function void Coop.stageHostUpdate()
 		Coop.stage.sendTimer = 120
 
 		u8[COOP_MEM_SEND + 0] = MSG_STAGE
-		u8[COOP_MEM_SEND + 1] = 0
+		u8[COOP_MEM_SEND + 1] = Coop.getOwnHostSettings()
 		u16[COOP_MEM_SEND + 2] = stage
 		Net.send(NET_TARGET_ALL, COOP_MEM_SEND, 4, true)
 	}
@@ -66,6 +67,24 @@ function void Coop.onStageMessage(u8 sender, u16 size)
 
 	Coop.stage.hostStage = u16[COOP_MEM_RECV + 2]
 	Coop.stage.hostStageKnown = true
+	Coop.stage.hostSettings = u8[COOP_MEM_RECV + 1]
+}
+
+
+function u8 Coop.getOwnHostSettings()
+{
+	u8 settings = 0
+	if (Coop.setting.bossPull)
+		settings |= HOST_SETTING_BOSS_PULL
+	if (Coop.setting.bossWait)
+		settings |= HOST_SETTING_BOSS_WAIT
+	return settings
+}
+
+// The host's settings decide for everyone
+function u8 Coop.getHostSettings()
+{
+	return Net.isHost() ? Coop.getOwnHostSettings() : Coop.stage.hostSettings
 }
 
 

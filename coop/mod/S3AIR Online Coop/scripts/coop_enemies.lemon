@@ -1,0 +1,237 @@
+//-------------------------------------------------------//
+// Online Co-op: destroyed badniks are gone for everyone //
+//-------------------------------------------------------//
+
+// How it works:
+//  - Every badnik placed in a level has an entry in the level's object layout (6 bytes: x, y + flags, type, subtype)
+//    and a matching byte in the respawn table at 0xffffeb00. Flag 0x80 there means "don't spawn again".
+//  - When a player destroys a badnik (the game calls "Enemy.addScore" for every one), we send its layout entry.
+//  - Other players look up the same layout entry in their own layout (by content, not by index, so it also works
+//    when characters have different layouts, like Knuckles) and set its respawn flag. If it's currently around,
+//    it explodes right away, wherever it is.
+//  - Each game keeps a list of the act's destroyed badniks and re-applies it after a restart or death.
+//  - Whenever a player arrives in an act (joining late, or following the host), they ask the host for its list.
+
+global u16  Coop.kills.lastFramecounter
+global bool Coop.kills.needReapply
+global u16  Coop.kills.requestedFor = 0xffff		// Act we last asked the host about (0xffff = none yet)
+
+
+// Called by the game for every destroyed badnik -- we add our part and pass it on
+function void Enemy.addScore(u32 enemyAddress, u32 scoreLookup)
+{
+	base.Enemy.addScore(enemyAddress, scoreLookup)
+	Coop.onLocalEnemyDestroyed(enemyAddress)
+}
+
+
+function void Coop.enemiesUpdate()
+{
+	if (!Net.isOnline())
+	{
+		u16[COOP_MEM_KILLS] = 0
+		Coop.kills.requestedFor = 0xffff
+		return
+	}
+	if (!Coop.isInLevel() || global.stage_type != 0)
+		return
+
+	Coop.checkKillListStage()
+
+	// After a restart (death, checkpoint, teleport), the respawn table was cleared -> apply the list again
+	if (level.framecounter < Coop.kills.lastFramecounter)
+		Coop.kills.needReapply = true
+	Coop.kills.lastFramecounter = level.framecounter
+
+	if (Coop.kills.needReapply)
+	{
+		Coop.kills.needReapply = false
+		u16 count = u16[COOP_MEM_KILLS]
+		for (u16 i = 0; i < count; ++i)
+			Coop.applyDestroyedEntry(COOP_MEM_KILLS + 0x10 + u32(i) * 8)
+	}
+
+	// Arrived in an act we haven't asked about yet: ask the host what was destroyed already
+	if (!Net.isHost() && Coop.kills.requestedFor != global.zone_act)
+	{
+		Coop.kills.requestedFor = global.zone_act
+		u32 msg = COOP_MEM_SEND
+		u8[msg + 0] = MSG_ENEMIES_REQUEST
+		u8[msg + 1] = 0
+		u16[msg + 2] = global.zone_act
+		Net.send(0, msg, 4, true)
+	}
+}
+
+
+// Host: answers a request with its list, if it's about the same act
+function void Coop.onEnemiesRequestMessage(u8 sender, u16 size)
+{
+	if (!Net.isHost() || size < 4)
+		return
+	if (u16[COOP_MEM_KILLS + 2] != u16[COOP_MEM_RECV + 2])
+		return
+	Coop.sendKillList(sender)
+}
+
+
+// The kill list belongs to one act; start over when the act changes
+function void Coop.checkKillListStage()
+{
+	if (u16[COOP_MEM_KILLS + 2] != global.zone_act)
+	{
+		u16[COOP_MEM_KILLS] = 0
+		u16[COOP_MEM_KILLS + 2] = global.zone_act
+	}
+}
+
+
+// Start of the level's object layout, or 0 if this level doesn't use the standard layout & respawn table
+function u32 Coop.getLayoutBase()
+{
+	u16 respawnBegin = dynobjects.respawn.begin
+	if (respawnBegin < 0xeb00 || respawnBegin >= 0xee00)
+		return 0
+	return dynobjects.addr.begin - u32(respawnBegin - 0xeb00) * 6
+}
+
+
+// Finds a 6-byte layout entry by content, returns its index or 0xffff
+function u16 Coop.findLayoutIndex(u32 entry)
+{
+	u32 base = Coop.getLayoutBase()
+	if (base == 0)
+		return 0xffff
+
+	u16 w0 = u16[entry]
+	u16 w1 = u16[entry + 2]
+	u16 w2 = u16[entry + 4]
+	for (u16 index = 0; index < 0x300; ++index)
+	{
+		u32 address = base + u32(index) * 6
+		if (u16[address] == 0xffff)
+			break
+		if (u16[address] == w0 && u16[address + 2] == w1 && u16[address + 4] == w2)
+			return index
+	}
+	return 0xffff
+}
+
+
+function void Coop.onLocalEnemyDestroyed(u32 enemyAddress)
+{
+	if (!Net.isOnline() || global.stage_type != 0)
+		return
+
+	u16 respawnEntry = u16[enemyAddress + 0x48]
+	if (respawnEntry < 0xeb00 || respawnEntry >= 0xee00)
+		return		// Not placed by the level layout (e.g. spawned by another object)
+
+	u32 base = Coop.getLayoutBase()
+	if (base == 0)
+		return
+	u32 layoutEntry = base + u32(respawnEntry - 0xeb00) * 6
+
+	Coop.checkKillListStage()
+	Coop.addToKillList(layoutEntry)
+
+	u32 msg = COOP_MEM_SEND
+	u8[msg + 0] = MSG_ENEMIES
+	u8[msg + 1] = 1
+	u16[msg + 2] = global.zone_act
+	copyMemory(msg + 4, layoutEntry, 6)
+	Net.send(NET_TARGET_ALL, msg, 10, true)
+}
+
+
+// Host only: send the whole list to one player, in chunks
+function void Coop.sendKillList(u8 target)
+{
+	u16 count = u16[COOP_MEM_KILLS]
+	u16 sent = 0
+	while (sent < count)
+	{
+		u8 chunk = min(count - sent, 40)
+		u32 msg = COOP_MEM_SEND2
+		u8[msg + 0] = MSG_ENEMIES
+		u8[msg + 1] = chunk
+		u16[msg + 2] = u16[COOP_MEM_KILLS + 2]
+		for (u8 i = 0; i < chunk; ++i)
+			copyMemory(msg + 4 + u32(i) * 6, COOP_MEM_KILLS + 0x10 + u32(sent + i) * 8, 6)
+		Net.send(target, msg, 4 + u16(chunk) * 6, true)
+		sent += chunk
+	}
+}
+
+
+function void Coop.onEnemiesMessage(u8 sender, u16 size)
+{
+	if (size < 4 || sender == Net.getLocalPlayerId())
+		return
+
+	// Only relevant if we're in the same act (same layout)
+	if (!Coop.isInLevel() || global.stage_type != 0 || u16[COOP_MEM_RECV + 2] != global.zone_act)
+		return
+
+	u8 count = u8[COOP_MEM_RECV + 1]
+	if (size < 4 + u16(count) * 6)
+		return
+
+	Coop.checkKillListStage()
+	for (u8 i = 0; i < count; ++i)
+	{
+		u32 entry = COOP_MEM_RECV + 4 + u32(i) * 6
+		if (Coop.addToKillList(entry))
+			Coop.applyDestroyedEntry(entry)
+	}
+}
+
+
+// Adds a layout entry to the kill list, returns false if it was in there already
+function bool Coop.addToKillList(u32 entry)
+{
+	u16 count = u16[COOP_MEM_KILLS]
+	for (u16 i = 0; i < count; ++i)
+	{
+		u32 address = COOP_MEM_KILLS + 0x10 + u32(i) * 8
+		if (u16[address] == u16[entry] && u16[address + 2] == u16[entry + 2] && u16[address + 4] == u16[entry + 4])
+			return false
+	}
+	if (count >= COOP_MAX_KILLS)
+		return true
+
+	copyMemory(COOP_MEM_KILLS + 0x10 + u32(count) * 8, entry, 6)
+	u16[COOP_MEM_KILLS] = count + 1
+	return true
+}
+
+
+// Makes sure the badnik for this layout entry is gone: blocks it from spawning, and destroys it if it's around
+function void Coop.applyDestroyedEntry(u32 entry)
+{
+	u16 index = Coop.findLayoutIndex(entry)
+	if (index == 0xffff)
+		return		// Not in our layout (e.g. a Knuckles-only badnik while playing Sonic)
+
+	u16 respawnEntry = 0xeb00 + index
+	u32 respawnAddress = 0xffff0000 + respawnEntry
+
+	// If it's currently loaded, destroy it the same way the game does when a player hits it (just without points)
+	if (u8[respawnAddress] & 0x80)
+	{
+		for (u32 address = 0xffffb128; address < 0xffffcfcb; address += 0x4a)
+		{
+			if (u16[address + 0x48] != respawnEntry || u32[address] == 0)
+				continue
+			if (u32[address] == addressof(SmallExplosion.BaseUpdate))
+				break		// Already exploding
+
+			u8[address + 0x2a] |= 0x80
+			u32[address] = addressof(SmallExplosion.BaseUpdate)
+			u8[address + 0x05] = 0
+			break
+		}
+	}
+
+	u8[respawnAddress] |= 0x80
+}

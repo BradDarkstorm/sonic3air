@@ -1,0 +1,475 @@
+//-------------------------------------------------------//
+// Online Co-op: shared bosses                           //
+//-------------------------------------------------------//
+
+// How it works:
+//
+// Boss health
+//  - All bosses use the same convention: the remaining hit count is at +0x29 of the boss object. On a hit, the
+//    game copies the collision value +0x28 to +0x25, sets +0x28 to 0 (the boss flashes and can't be hit), and
+//    decreases +0x29; at 0 it sets flag 0x80 in +0x2a, and the boss's own script plays its defeat sequence.
+//  - Each object slot is watched. An object becomes a "boss" when its hit count goes from 0 to something. Its key is
+//    the update address it had at that moment -- the same on every PC, as everyone runs the same boss script.
+//  - When our own hit count drops while flashing, we hit it: tell everyone. When someone else hit it, we do the
+//    exact same hit on our boss (once it's done flashing), so it reacts, loses health and dies like normal.
+//  - The host counts all hits per boss. Players who get to a boss later ask the host and catch up.
+//
+// Dying in a boss fight
+//  - If teammates in the same stage are still alive, you spectate instead of restarting (the game's restart
+//    countdown is held). When the boss is beaten, you're brought back next to a teammate.
+//  - If everyone died, everyone restarts as usual and the boss starts over with full health.
+//
+// Getting to the boss (host's settings)
+//  - "Pull everyone to the boss": when someone reaches a boss, everyone else in the stage gets teleported there.
+//  - "Wait for everyone at the boss": the game holds (like a pause) at the boss until all players are there.
+
+global bool Coop.boss.wasInBoss
+global bool Coop.boss.spectating
+global bool Coop.boss.waiting
+global u16  Coop.boss.waitTimer
+global u16  Coop.boss.tableStage
+
+
+function void Coop.bossesUpdate()
+{
+	if (!Net.isOnline())
+	{
+		Coop.resetBossSlots()
+		Coop.boss.spectating = false
+		return
+	}
+	if (!Coop.isInLevel() || global.stage_type != 0)
+		return
+
+	if (global.game.paused == 0)
+		Coop.trackBossSlots()
+
+	// Arriving at a boss
+	bool inBoss = (level.boss_encounter != 0)
+	if (inBoss && !Coop.boss.wasInBoss && u8[0xffffb005] < base_state.DIED)
+		Coop.onArrivedAtBoss()
+	Coop.boss.wasInBoss = inBoss
+
+	if (Net.isHost())
+		Coop.hostBossTableUpdate()
+
+	if (Coop.boss.spectating)
+		Coop.drawSpectatorInfo()
+}
+
+
+function void Coop.resetBossSlots()
+{
+	zeroMemory(COOP_MEM_SLOTS, u32(COOP_NUM_SLOTS) * 0x10)
+}
+
+
+function u32 Coop.getSlotAddress(u8 slot)
+{
+	return 0xffffb128 + u32(slot) * 0x4a
+}
+
+
+function void Coop.trackBossSlots()
+{
+	for (u8 slot = 0; slot < COOP_NUM_SLOTS; ++slot)
+	{
+		u32 object = Coop.getSlotAddress(slot)
+		u32 track = COOP_MEM_SLOTS + u32(slot) * 0x10
+		u32 updateAddress = u32[object]
+		u8 hits = u8[object + 0x29]
+
+		// Slot got emptied or reused by something else -> forget
+		if (updateAddress == 0 || u32[track] != 0 && u8[track + 4] == 0 && hits == 0)
+		{
+			u32[track] = 0
+			u8[track + 4] = 0
+			u8[track + 5] = 0
+			u8[track + 6] = 0
+			u32[track + 8] = updateAddress
+			continue
+		}
+
+		if (u32[track] == 0)
+		{
+			// Becomes a boss when its hit count goes from 0 to something, during a boss fight, as an attackable enemy
+			if (hits != 0 && hits <= 0x20 && u8[track + 4] == 0 && level.boss_encounter != 0 && u8[object + 0x28] != 0 && (u8[object + 0x28] & 0xc0) == 0)
+			{
+				u32[track] = updateAddress
+				u8[track + 4] = hits
+				u8[track + 5] = 0
+				u8[track + 6] = 0
+				Coop.queryBossBacklog(slot)
+			}
+			u32[track + 8] = updateAddress
+			continue
+		}
+
+		// Our own hits: the count went down while the boss is flashing (collision cleared)
+		u8 lastHits = u8[track + 4]
+		//  -> Exactly like the game's hit code: collision cleared and backed up to +0x25, count down by one
+		if (hits + 1 == lastHits && u8[object + 0x28] == 0 && u8[object + 0x25] != 0)
+		{
+			Coop.sendBossHits(u32[track], lastHits - hits)
+		}
+		u8[track + 4] = hits
+
+		// Hits from others: apply one at a time, whenever the boss can be hit again
+		if (u8[track + 5] > 0 && hits > 0 && u8[object + 0x28] != 0)
+		{
+			Coop.applyBossHit(object)
+			u8[track + 5] -= 1
+			u8[track + 4] = u8[object + 0x29]
+		}
+		u32[track + 8] = updateAddress
+	}
+}
+
+
+// Does the same as the game when a player hits a boss (see "Character" touch response code)
+function void Coop.applyBossHit(u32 object)
+{
+	u8[object + 0x1c] = 0x00		// Low byte of the attacking character's address (player 1 = 0xffffb000)
+	u8[object + 0x25] = u8[object + 0x28]
+	u8[object + 0x28] = 0
+	u8[object + 0x29] -= 1
+	if (u8[object + 0x29] == 0)
+		u8[object + 0x2a] |= 0x80
+}
+
+
+function void Coop.sendBossHits(u32 key, u8 count)
+{
+	u32 msg = COOP_MEM_SEND
+	u8[msg + 0] = MSG_BOSS_HIT
+	u8[msg + 1] = count
+	u16[msg + 2] = global.zone_act
+	u32[msg + 4] = key
+	Net.send(NET_TARGET_ALL, msg, 8, true)
+
+	if (Net.isHost())
+		Coop.hostAddBossHits(key, global.zone_act, count)
+}
+
+
+function void Coop.onBossHitMessage(u8 sender, u16 size)
+{
+	if (size < 8 || sender == Net.getLocalPlayerId())
+		return
+	u8 count = u8[COOP_MEM_RECV + 1]
+	u16 zoneAct = u16[COOP_MEM_RECV + 2]
+	u32 key = u32[COOP_MEM_RECV + 4]
+
+	if (Net.isHost())
+		Coop.hostAddBossHits(key, zoneAct, count)
+
+	if (zoneAct != global.zone_act)
+		return
+	for (u8 slot = 0; slot < COOP_NUM_SLOTS; ++slot)
+	{
+		u32 track = COOP_MEM_SLOTS + u32(slot) * 0x10
+		if (u32[track] == key)
+			u8[track + 5] = min(u8[track + 5] + count, 0xff)
+	}
+}
+
+
+// A boss just appeared here: maybe others already hit it
+function void Coop.queryBossBacklog(u8 slot)
+{
+	u32 track = COOP_MEM_SLOTS + u32(slot) * 0x10
+	u8[track + 6] = 1
+	if (Net.isHost())
+	{
+		Coop.applyBossBacklog(u32[track], Coop.hostGetBossHits(u32[track], global.zone_act))
+		return
+	}
+
+	u32 msg = COOP_MEM_SEND
+	u8[msg + 0] = MSG_BOSS_QUERY
+	u8[msg + 1] = 0
+	u16[msg + 2] = global.zone_act
+	u32[msg + 4] = u32[track]
+	Net.send(0, msg, 8, true)
+}
+
+
+function void Coop.onBossQueryMessage(u8 sender, u16 size)
+{
+	if (size < 8 || !Net.isHost())
+		return
+	u16 zoneAct = u16[COOP_MEM_RECV + 2]
+	u32 key = u32[COOP_MEM_RECV + 4]
+
+	u32 msg = COOP_MEM_SEND
+	u8[msg + 0] = MSG_BOSS_BACKLOG
+	u8[msg + 1] = Coop.hostGetBossHits(key, zoneAct)
+	u16[msg + 2] = zoneAct
+	u32[msg + 4] = key
+	Net.send(sender, msg, 8, true)
+}
+
+
+function void Coop.onBossBacklogMessage(u8 sender, u16 size)
+{
+	if (size < 8 || sender != 0 || u16[COOP_MEM_RECV + 2] != global.zone_act)
+		return
+	Coop.applyBossBacklog(u32[COOP_MEM_RECV + 4], u8[COOP_MEM_RECV + 1])
+}
+
+
+// Catch up on hits others already did: take them off directly; if that's enough to beat it, the last one is a real hit
+function void Coop.applyBossBacklog(u32 key, u8 hitsDone)
+{
+	if (hitsDone == 0)
+		return
+	for (u8 slot = 0; slot < COOP_NUM_SLOTS; ++slot)
+	{
+		u32 track = COOP_MEM_SLOTS + u32(slot) * 0x10
+		if (u32[track] != key)
+			continue
+
+		u32 object = Coop.getSlotAddress(slot)
+		u8 hits = u8[object + 0x29]
+		if (hits == 0)
+			continue
+		if (hitsDone >= hits)
+		{
+			u8[object + 0x29] = 1
+			u8[track + 5] = 1
+		}
+		else
+		{
+			u8[object + 0x29] = hits - hitsDone
+		}
+		u8[track + 4] = u8[object + 0x29]
+	}
+}
+
+
+// Host: hit counts per boss of the current act
+function void Coop.hostBossTableUpdate()
+{
+	if (Coop.boss.tableStage != global.zone_act)
+	{
+		zeroMemory(COOP_MEM_BOSSES, u32(COOP_MAX_BOSSES) * 0x10)
+		Coop.boss.tableStage = global.zone_act
+	}
+
+	// Everyone died -> the boss fight starts over for everyone
+	if (Coop.isEveryoneDead())
+		zeroMemory(COOP_MEM_BOSSES, u32(COOP_MAX_BOSSES) * 0x10)
+}
+
+function u8 Coop.hostGetBossHits(u32 key, u16 zoneAct)
+{
+	for (u8 i = 0; i < COOP_MAX_BOSSES; ++i)
+	{
+		u32 entry = COOP_MEM_BOSSES + u32(i) * 0x10
+		if (u32[entry] == key && u16[entry + 4] == zoneAct)
+			return u8[entry + 6]
+	}
+	return 0
+}
+
+function void Coop.hostAddBossHits(u32 key, u16 zoneAct, u8 count)
+{
+	u32 freeEntry = 0
+	for (u8 i = 0; i < COOP_MAX_BOSSES; ++i)
+	{
+		u32 entry = COOP_MEM_BOSSES + u32(i) * 0x10
+		if (u32[entry] == key && u16[entry + 4] == zoneAct)
+		{
+			u8[entry + 6] = min(u8[entry + 6] + count, 0xff)
+			return
+		}
+		if (u32[entry] == 0 && freeEntry == 0)
+			freeEntry = entry
+	}
+	if (freeEntry != 0)
+	{
+		u32[freeEntry] = key
+		u16[freeEntry + 4] = zoneAct
+		u8[freeEntry + 6] = count
+	}
+}
+
+
+// Is any other player in our stage alive right now? (returns their ID, or 0xff)
+function u8 Coop.findAliveTeammate()
+{
+	for (u8 id = 0; id < COOP_MAX_PLAYERS; ++id)
+	{
+		if (!Coop.canTeleportTo(id))
+			continue
+		u32 data = Coop.getPlayerBlock(id) + 0x10
+		if ((u8[data + 0x0c] & PRESENCE_FLAG_DEAD) == 0)
+			return id
+	}
+	return 0xff
+}
+
+function bool Coop.isEveryoneDead()
+{
+	if (u8[0xffffb005] < base_state.DIED)
+		return false
+	for (u8 id = 0; id < COOP_MAX_PLAYERS; ++id)
+	{
+		if (id == Net.getLocalPlayerId() || !Net.isPlayerConnected(id))
+			continue
+		u32 block = Coop.getPlayerBlock(id)
+		if (u8[block] == 0 || u16[block + 0x10 + 0x02] != global.zone_act.apparent)
+			continue		// Not here, doesn't count
+		if ((u8[block + 0x10 + 0x0c] & PRESENCE_FLAG_DEAD) == 0)
+			return false
+	}
+	return true
+}
+
+
+//-------------------------------------------------------//
+// Spectating after dying in a boss fight                //
+//-------------------------------------------------------//
+
+// Called by the game while a dead character waits for the restart -- we hold the countdown while spectating
+function void Character.UpdateRestartDelay()
+{
+	if (A0 != 0xffffb000 || !Net.isOnline())
+	{
+		base.Character.UpdateRestartDelay()
+		return
+	}
+
+	// Start spectating if we died during a boss fight and a teammate is still fighting
+	if (!Coop.boss.spectating && level.boss_encounter != 0 && Coop.findAliveTeammate() != 0xff)
+		Coop.boss.spectating = true
+
+	if (Coop.boss.spectating)
+	{
+		u8 teammate = Coop.findAliveTeammate()
+		if (level.boss_encounter != 0 && teammate != 0xff)
+			return		// Keep watching, don't count down
+
+		Coop.boss.spectating = false
+		if (teammate != 0xff)
+		{
+			// Boss is beaten: come back next to a teammate (lives were already taken by the game when dying)
+			Coop.teleportTo(teammate)
+			return
+		}
+		// Everyone's down: normal restart
+	}
+
+	base.Character.UpdateRestartDelay()
+}
+
+
+function void Coop.drawSpectatorInfo()
+{
+	s32 px = getScreenWidth() / 2
+	Renderer.drawText(COOP_TP_FONT, px, 40, "SPECTATING", 0xffff60ff, 5, 0, 0xfe10, false)
+	Renderer.drawText("oxyfont_tiny:gradient:outline(0x000000ff,1,false)", px, 52, "YOU'LL BE BACK WHEN THE BOSS IS BEATEN", 0xffffffff, 5, 0, 0xfe10, false)
+}
+
+
+//-------------------------------------------------------//
+// Getting everyone to the boss                          //
+//-------------------------------------------------------//
+
+function void Coop.onArrivedAtBoss()
+{
+	A0 = 0xffffb000
+	u32 msg = COOP_MEM_SEND
+	u8[msg + 0] = MSG_BOSS_ARRIVED
+	u8[msg + 1] = (global.zone_act != global.zone_act.apparent) ? 1 : 0
+	u16[msg + 2] = global.zone_act.apparent
+	u16[msg + 4] = char.position.x.u16
+	u16[msg + 6] = char.position.y.u16
+	u16[msg + 8] = u16[0xffffb046]
+	u16[msg + 10] = char.sprite_attributes
+	Net.send(NET_TARGET_ALL, msg, 12, true)
+
+	// Hold the game until everyone is here?
+	if (Coop.getHostSettings() & HOST_SETTING_BOSS_WAIT)
+	{
+		Coop.boss.waiting = true
+		Coop.boss.waitTimer = 0
+	}
+}
+
+
+function void Coop.onBossArrivedMessage(u8 sender, u16 size)
+{
+	if (size < 12 || sender == Net.getLocalPlayerId())
+		return
+	if ((Coop.getHostSettings() & HOST_SETTING_BOSS_PULL) == 0)
+		return
+
+	// Only if we're in the same stage, playing normally, and not at a boss ourselves
+	if (!Coop.isInLevel() || global.stage_type != 0 || level.boss_encounter != 0 || global.game.paused != 0)
+		return
+	if (u16[COOP_MEM_RECV + 2] != global.zone_act.apparent)
+		return
+	bool ownActTrans = (global.zone_act != global.zone_act.apparent)
+	if ((u8[COOP_MEM_RECV + 1] != 0) != ownActTrans)
+		return
+	if (u8[0xffffb005] != base_state.NORMAL || level.restart != 0)
+		return
+
+	Coop.teleportToPosition(u16[COOP_MEM_RECV + 4], u16[COOP_MEM_RECV + 6], u16[COOP_MEM_RECV + 8], u16[COOP_MEM_RECV + 10])
+}
+
+
+// Are all players who are in our stage at the boss (or dead) now?
+function bool Coop.isEveryoneAtBoss()
+{
+	for (u8 id = 0; id < COOP_MAX_PLAYERS; ++id)
+	{
+		if (id == Net.getLocalPlayerId() || !Net.isPlayerConnected(id))
+			continue
+		u32 block = Coop.getPlayerBlock(id)
+		if (u8[block] == 0 || u16[block + 0x10 + 0x02] != global.zone_act.apparent)
+			continue		// Not in this stage (e.g. still in a menu): don't wait for them
+		u32 data = block + 0x10
+		if ((u8[data + 0x0f] & PRESENCE_FLAG2_IN_BOSS) == 0 && (u8[data + 0x0c] & PRESENCE_FLAG_DEAD) == 0)
+			return false
+	}
+	return true
+}
+
+
+// Called by the game once per frame during gameplay -- we use it to hold the game at the boss, the same way the pause menu does
+function void UpdateGamePause()
+{
+	base.UpdateGamePause()
+
+	if (!Coop.boss.waiting)
+		return
+
+	while (true)
+	{
+		if (!Net.isOnline() || Coop.isEveryoneAtBoss() || level.boss_encounter == 0)
+			break
+
+		// Safety: give up waiting after a minute, or when the player presses Start
+		++Coop.boss.waitTimer
+		if (Coop.boss.waitTimer > 60 * 60 || Input.buttonPressed(BUTTON_START))
+			break
+
+		Renderer.resetLifetimeContext(1)
+		Renderer.setLifetimeContext(1)
+		s32 px = getScreenWidth() / 2
+		s32 py = getScreenHeight() / 2
+		Renderer.drawRect(px - 120, py - 16, 240, 34, 0x000000a0, 0xfe00, false)
+		Renderer.drawText(COOP_TP_FONT, px, py - 4, "WAITING FOR EVERYONE...", 0xffff60ff, 5, 0, 0xfe10, false)
+		Renderer.drawText("oxyfont_tiny:gradient:outline(0x000000ff,1,false)", px, py + 9, "PRESS START TO GO AHEAD", 0xffffffff, 5, 0, 0xfe10, false)
+
+		enableCustomPlaneReset = false
+		waitForNextFrame()
+		enableCustomPlaneReset = false
+		--global.framecounter
+	}
+
+	Renderer.resetLifetimeContext(1)
+	Coop.boss.waiting = false
+}

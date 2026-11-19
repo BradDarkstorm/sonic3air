@@ -34,7 +34,15 @@ This is **phase 1** (the foundation). See "Roadmap" for what comes next.
 - Everyone starts a game (any save slot or no save, any character).
 - Joining players get moved to the host's stage automatically, and follow when the host moves on to the next act or zone.
 - If you finish act 1 before the host, you stay in act 2; you won't get pulled back. You can't run ahead into a new zone, though.
-- Mod settings (Options → Mods → Online Co-op): player names, off-screen markers, solid or see-through players.
+- **Badniks:** when anyone destroys a badnik, it's gone for everyone, wherever they are. If it's on your screen, it explodes. It also stays gone after you die or restart. Players who join mid-act get the list from the host. Kills are matched by the badnik's entry in the level layout, so they carry over between Sonic's and Knuckles' versions of a stage where those share the badnik.
+- **Teleport:** pause, then press **left/right** to pick a player in your stage ("TELEPORT TO: name"), and choose **Continue**. It works like a restart at a checkpoint placed where they are, so the level loads properly around you. You keep your rings and time; a shield is lost.
+- **Bosses:** boss health is shared. Every hit anyone lands counts on everyone's boss, which flashes and reacts as if you'd hit it, and it's defeated for everyone together. If you get there late, your boss already has the damage others did.
+- **Dying at a boss:** if a teammate in your stage is still alive, you **spectate** instead of restarting. Once the boss is beaten, you're brought back next to a teammate. If everyone dies, everyone restarts as usual and the boss starts over at full health.
+- **Getting to the boss (the host's settings count for everyone):**
+  - *Move Everyone to the Boss* (default on): when someone reaches a boss, everyone else in the stage is teleported there.
+  - *Wait for Everyone at the Boss* (default off): the game holds at the boss with "WAITING FOR EVERYONE..." until all players are there. Press Start to go ahead anyway; it also gives up after a minute.
+- Mod settings (Options → Mods → Online Co-op): player names, off-screen markers, solid or see-through players, and the two boss options.
+- **Keep Online Co-op at the top of your active mods list**, so it runs around other mods' changes. Some character mods (like Amy Galore) replace game functions the co-op mod hooks into.
 
 ### Modded characters
 Each game records the exact sprites it draws for its own character, plus that character's colours, and sends them to everyone. Other games redraw exactly those sprites. This works with any character mod, however it's built internally.
@@ -94,11 +102,12 @@ Player 0 is always the host. The host passes messages between joining players au
 | Phase | Feature | Status |
 |---|---|---|
 | 1 | Host/join, everyone in the host's stage, seeing each other (including modded characters and their colours) | **Done** |
-| 2 | Enemy kills synced: an enemy one player kills is gone for everyone (by its level slot, not its position) | Next |
-| 2 | Teleport to another player from the pause menu | Next |
-| 3 | Boss health shared; the host keeps the real hit count | Planned |
-| 3 | Dying during a boss fight: watch the others until the boss is beaten | Planned |
-| 3 | Options: pull everyone to the boss when one player arrives, or wait for everyone before it starts | Planned |
+| 2 | Enemy kills synced: an enemy one player kills is gone for everyone (by its level slot, not its position) | **Done (needs in-game testing)** |
+| 2 | Teleport to another player from the pause menu | **Done (needs in-game testing)** |
+| – | Off-screen markers only show on some animations | Known issue, on hold |
+| 3 | Boss health shared; the host keeps the real hit count | **Done (needs in-game testing)** |
+| 3 | Dying during a boss fight: watch the others until the boss is beaten | **Done (needs in-game testing)** |
+| 3 | Options: pull everyone to the boss when one player arrives, or wait for everyone before it starts | **Done (needs in-game testing)** |
 | 4 | Special stages: everyone enters together; a waiting screen until all finish; the emerald counts if **anyone** wins | Planned |
 | 5 | Tails can carry other players | Planned |
 
