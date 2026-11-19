@@ -1,0 +1,118 @@
+//-------------------------------------------------------//
+// Online Co-op: everyone follows the host's stage       //
+//-------------------------------------------------------//
+
+// Host side
+global u16 Coop.stage.lastSentStage
+global u16 Coop.stage.sendTimer
+
+// Client side
+global u16 Coop.stage.hostStage			// Last stage the host told us about
+global bool Coop.stage.hostStageKnown
+global u16 Coop.stage.lastFollowedStage	// Last host stage we already reacted to
+global bool Coop.stage.followedOnce
+
+
+function void Coop.stageUpdate()
+{
+	u8 state = Net.getState()
+	if (state == NET_HOSTING)
+	{
+		Coop.stageHostUpdate()
+	}
+	else if (state == NET_CONNECTED)
+	{
+		Coop.stageClientUpdate()
+	}
+	else
+	{
+		// Reset, so a new session starts fresh
+		Coop.stage.hostStageKnown = false
+		Coop.stage.followedOnce = false
+		Coop.stage.sendTimer = 0
+	}
+}
+
+
+function void Coop.stageHostUpdate()
+{
+	// Only in normal level gameplay; special / bonus stages are handled separately later
+	if (!Coop.isInLevel() || global.stage_type != 0)
+		return
+
+	u16 stage = global.zone_act.apparent
+	if (Coop.stage.sendTimer > 0)
+		--Coop.stage.sendTimer
+
+	// Send on change, and repeat every 2 seconds so late joiners pick it up
+	if (stage != Coop.stage.lastSentStage || Coop.stage.sendTimer == 0)
+	{
+		Coop.stage.lastSentStage = stage
+		Coop.stage.sendTimer = 120
+
+		u8[COOP_MEM_SEND + 0] = MSG_STAGE
+		u8[COOP_MEM_SEND + 1] = 0
+		u16[COOP_MEM_SEND + 2] = stage
+		Net.send(NET_TARGET_ALL, COOP_MEM_SEND, 4, true)
+	}
+}
+
+
+function void Coop.onStageMessage(u8 sender, u16 size)
+{
+	// Only the host decides the stage
+	if (sender != 0 || size < 4 || Net.isHost())
+		return
+
+	Coop.stage.hostStage = u16[COOP_MEM_RECV + 2]
+	Coop.stage.hostStageKnown = true
+}
+
+
+function void Coop.stageClientUpdate()
+{
+	if (!Coop.stage.hostStageKnown)
+		return
+
+	// Can only switch stage while playing a normal level (the player needs to start a game first)
+	if (!Coop.isInLevel() || global.stage_type != 0)
+		return
+
+	u16 ownStage = global.zone_act.apparent
+	u16 hostStage = Coop.stage.hostStage
+	if (ownStage == hostStage)
+	{
+		Coop.stage.lastFollowedStage = hostStage
+		Coop.stage.followedOnce = true
+		return
+	}
+
+	// Rules:
+	//  - Different zone: always go to the host (you can't run ahead into the next zone)
+	//  - Same zone, different act: only follow when the host has moved on since we last followed,
+	//    so finishing act 1 before the host doesn't pull you back from act 2
+	bool differentZone = ((ownStage >> 8) != (hostStage >> 8))
+	bool hostMoved = (!Coop.stage.followedOnce || hostStage != Coop.stage.lastFollowedStage)
+	if (!differentZone && !hostMoved)
+		return
+	if (!differentZone && (ownStage & 0xff) > (hostStage & 0xff))
+	{
+		// We're ahead in the same zone, the host will catch up
+		Coop.stage.lastFollowedStage = hostStage
+		Coop.stage.followedOnce = true
+		return
+	}
+
+	Coop.stage.lastFollowedStage = hostStage
+	Coop.stage.followedOnce = true
+	Coop.warpToStage(hostStage)
+}
+
+
+function void Coop.warpToStage(u16 zoneAndAct)
+{
+	// Same as the pause menu's "Restart", just with a different target stage
+	global.zone_act.apparent = zoneAndAct
+	global.zone_act = zoneAndAct
+	restartLevel()
+}

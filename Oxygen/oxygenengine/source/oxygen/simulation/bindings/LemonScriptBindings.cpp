@@ -37,6 +37,7 @@
 #include <lemon/program/ModuleBindingsBuilder.h>
 #include <lemon/program/Program.h>
 #include <lemon/runtime/Runtime.h>
+#include "oxygen/network/coopnet/CoopNet.h"	// CoopNet addition
 
 #include <rmxmedia.h>
 
@@ -1251,6 +1252,9 @@ void LemonScriptBindings::registerBindings(lemon::Module& module)
 
 	// Audio
 	AudioBindings::registerBindings(module);
+
+	// CoopNet (online co-op messaging for script mods)
+	CoopNet::registerScriptBindings(module);
 
 	// Modding
 	{

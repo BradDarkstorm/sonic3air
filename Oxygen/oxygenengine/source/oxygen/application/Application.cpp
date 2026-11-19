@@ -39,6 +39,7 @@
 #include "oxygen/simulation/LogDisplay.h"
 #include "oxygen/simulation/PersistentData.h"
 #include "oxygen/simulation/Simulation.h"
+#include "oxygen/network/coopnet/CoopNet.h"	// CoopNet addition
 #if defined(SUPPORT_IMGUI)
 	#include "oxygen/menu/devmode/DevModeMainWindow.h"
 #endif
@@ -555,6 +556,7 @@ void Application::update(float timeElapsed)
 
 	// Update engine server client and netplay
 	EngineServerClient::instance().updateClient(timeElapsed);
+	CoopNet::instance().update(timeElapsed);	// CoopNet addition
 
 	// Update command forwarder
 	CommandForwarder::instance().update(timeElapsed);

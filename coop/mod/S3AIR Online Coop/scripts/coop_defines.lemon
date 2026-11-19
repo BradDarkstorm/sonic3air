@@ -1,0 +1,77 @@
+//-------------------------------------------------------//
+// Online Co-op: shared definitions                      //
+//-------------------------------------------------------//
+
+// Players must run exactly the same signature to join each other; bump on any protocol change
+constant string COOP_SIGNATURE = "s3air-online-coop/0.1.0"
+
+// Mod settings (set by the game from mod.json "Settings")
+global u8 Coop.setting.showNames = 1
+global u8 Coop.setting.showOffscreen = 1
+global u8 Coop.setting.opacity = 0
+
+
+// Engine "Net" states (see CoopNet.h)
+constant u8 NET_IDLE		 = 0
+constant u8 NET_HOSTING		 = 1
+constant u8 NET_CONNECTING	 = 2
+constant u8 NET_CONNECTED	 = 3
+constant u8 NET_FAILED		 = 4
+constant u8 NET_DISCONNECTED = 5
+
+constant u8 NET_TARGET_ALL	 = 0xff
+constant u8 COOP_MAX_PLAYERS = 8
+
+
+// Message types (first byte of every message)
+constant u8 MSG_PRESENCE	= 0x01		// Unreliable, ~30 times per second: own character state
+constant u8 MSG_STAGE		= 0x02		// Reliable, host only: the stage everyone should be in
+// Reserved for upcoming features:
+//  0x10 = enemy destroyed, 0x20 = boss hit / boss state, 0x30 = special stage, 0x40 = teleport request
+
+
+// Memory layout inside the engine's shared memory, using the otherwise unused top 64 KB (0x8f0000 .. 0x8fffff)
+constant u32 COOP_MEM_SEND		= 0x8f0000		// 0x100 bytes, outgoing message buffer
+constant u32 COOP_MEM_RECV		= 0x8f0100		// 0x400 bytes, incoming message buffer
+constant u32 COOP_MEM_PLAYERS	= 0x8f1000		// 0x40 bytes per remote player (8 players)
+constant u32 COOP_PLAYER_SIZE	= 0x40
+
+// Per remote player block at COOP_MEM_PLAYERS + id * COOP_PLAYER_SIZE:
+//  +0x00  u8   valid (1 if we got presence data recently)
+//  +0x02  u16  frames since last presence update
+//  +0x10  0x10 bytes: copy of the latest presence message (layout below)
+
+// Presence message layout (0x10 bytes):
+//  +0x00  u8   MSG_PRESENCE
+//  +0x01  u8   character (0 Sonic, 1 Tails, 2 Knuckles, modded characters may use more)
+//  +0x02  u16  apparent zone & act
+//  +0x04  u16  x position
+//  +0x06  u16  y position
+//  +0x08  u16  extended animation sprite (incl. Drop Dash / Peel-Out sprites and modded values)
+//  +0x0a  u8   raw animation sprite
+//  +0x0b  u8   rotation
+//  +0x0c  u8   flags, see PRESENCE_FLAG_*
+//  +0x0d  u8   Tails' tails animation sprite (0 = none)
+//  +0x0e  u8   Tails' tails angle
+//  +0x0f  u8   reserved
+constant u8 PRESENCE_SIZE = 0x10
+
+constant u8 PRESENCE_FLAG_FLIP_X		= 0x01
+constant u8 PRESENCE_FLAG_FLIP_Y		= 0x02
+constant u8 PRESENCE_FLAG_PRIORITY		= 0x04
+constant u8 PRESENCE_FLAG_SUPER			= 0x08
+constant u8 PRESENCE_FLAG_ACT_TRANS		= 0x10		// Apparent act differs from actual act (seamless act transitions)
+constant u8 PRESENCE_FLAG_FACING_LEFT	= 0x20
+constant u8 PRESENCE_FLAG_VISIBLE		= 0x40		// Cleared while blinking after a hit, or when the character isn't drawn
+
+
+function u32 Coop.getPlayerBlock(u8 playerId)
+{
+	return COOP_MEM_PLAYERS + u32(playerId) * COOP_PLAYER_SIZE
+}
+
+// True while actually playing a level of the main game (not in menus, competition mode, or before the level started)
+function bool Coop.isInLevel()
+{
+	return (global.game_mode == 0x0c && competition_mode.active == 0 && global.level_started > 0)
+}

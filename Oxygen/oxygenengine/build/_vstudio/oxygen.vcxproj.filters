@@ -505,6 +505,9 @@
     <ClCompile Include="..\..\source\oxygen\network\netplay\NetplayClient.cpp">
       <Filter>network\netplay</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\source\oxygen\network\coopnet\CoopNet.cpp">
+      <Filter>network</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\source\oxygen\network\netplay\NetplayHost.cpp">
       <Filter>network\netplay</Filter>
     </ClCompile>
@@ -1089,6 +1092,9 @@
     </ClInclude>
     <ClInclude Include="..\..\source\oxygen\network\netplay\NetplayClient.h">
       <Filter>network\netplay</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\source\oxygen\network\coopnet\CoopNet.h">
+      <Filter>network</Filter>
     </ClInclude>
     <ClInclude Include="..\..\source\oxygen\network\netplay\NetplayHost.h">
       <Filter>network\netplay</Filter>

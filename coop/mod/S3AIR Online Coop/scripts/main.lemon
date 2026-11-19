@@ -1,0 +1,23 @@
+//# script-feature-level(2)
+
+/*
+	Online Co-op mod for Sonic 3 A.I.R.
+	Requires the Co-op edition of the game (engine with the "Net.*" script functions).
+
+	File overview:
+	 - coop_defines:  constants, memory layout, settings variables
+	 - coop_session:  starting the session from coop.json, status display
+	 - coop_stage:    everyone follows the host's stage
+	 - coop_players:  sending own character state and drawing everyone else
+
+	Future-proofing rules followed in this mod:
+	 - Never copy-and-edit base game functions. Only use own hook functions or
+	   overrides that call "base." so game updates flow through.
+	 - All network message layouts live in coop_defines with a protocol version,
+	   bump COOP_SIGNATURE whenever a layout changes.
+*/
+
+include coop_defines
+include coop_session
+include coop_stage
+include coop_players

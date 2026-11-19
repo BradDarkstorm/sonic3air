@@ -1,0 +1,114 @@
+//-------------------------------------------------------//
+// Online Co-op: session start and status display        //
+//-------------------------------------------------------//
+
+global bool Coop.startAttempted
+global u8   Coop.lastState
+global u8   Coop.lastNumPlayers
+global u16  Coop.statusTimer
+
+
+//# post-update-hook
+function void Coop.sessionUpdate()
+{
+	// Start the session once, as configured in coop.json
+	if (!Coop.startAttempted)
+	{
+		Coop.startAttempted = true
+		Net.setSignature(COOP_SIGNATURE)
+		Net.startFromConfig()
+		Coop.statusTimer = 600
+	}
+
+	// Show status for a while whenever something changes
+	u8 state = Net.getState()
+	u8 numPlayers = Net.getNumPlayers()
+	if (state != Coop.lastState || numPlayers != Coop.lastNumPlayers)
+	{
+		Coop.lastState = state
+		Coop.lastNumPlayers = numPlayers
+		Coop.statusTimer = 300
+	}
+
+	// Read all incoming messages, then do the per-frame feature updates
+	Coop.processMessages()
+	Coop.stageUpdate()
+	Coop.playersUpdate()
+
+	Coop.drawStatus()
+}
+
+
+function void Coop.processMessages()
+{
+	// Limit per frame, just in case
+	for (u16 i = 0; i < 256; ++i)
+	{
+		u16 size = Net.receive(COOP_MEM_RECV, 0x400)
+		if (size == 0)
+			break
+
+		u8 sender = Net.getLastSender()
+		u8 msgType = u8[COOP_MEM_RECV]
+
+		if (msgType == MSG_PRESENCE)
+		{
+			Coop.onPresenceMessage(sender, size)
+		}
+		else if (msgType == MSG_STAGE)
+		{
+			Coop.onStageMessage(sender, size)
+		}
+		// Unknown types are ignored, so newer hosts can add features without breaking older message handling
+	}
+}
+
+
+function void Coop.drawStatus()
+{
+	if (Coop.statusTimer == 0)
+		return
+	--Coop.statusTimer
+
+	u8 state = Net.getState()
+	if (state == NET_IDLE)
+		return
+
+	string text
+	u32 color = 0xffffffff
+	if (state == NET_HOSTING)
+	{
+		text = stringformat("CO-OP HOST  -  %d PLAYER(S)", Net.getNumPlayers())
+	}
+	else if (state == NET_CONNECTED)
+	{
+		text = stringformat("CO-OP  -  %d PLAYER(S)", Net.getNumPlayers())
+	}
+	else if (state == NET_CONNECTING)
+	{
+		text = "CO-OP: CONNECTING..."
+		Coop.statusTimer = max(Coop.statusTimer, 2)		// Keep visible while connecting
+	}
+	else
+	{
+		text = stringformat("CO-OP: %s", Net.getStatusText())
+		color = 0xff8080ff
+	}
+
+	Renderer.drawText("oxyfont_tiny:gradient:outline(0x000000ff,1,false)", 4, 4, text, color, 1, 0, 0xf000, false)
+
+	// List names under the status line
+	if (state == NET_HOSTING || state == NET_CONNECTED)
+	{
+		s32 py = 14
+		for (u8 id = 0; id < COOP_MAX_PLAYERS; ++id)
+		{
+			if (!Net.isPlayerConnected(id))
+				continue
+
+			string marker = (id == Net.getLocalPlayerId()) ? "> " : "  "
+			Renderer.drawText("oxyfont_tiny:gradient:outline(0x000000ff,1,false)", 4, py, stringformat("%sP%d %s", marker, id + 1, Net.getPlayerName(id)), 0xffffffff, 1, 0, 0xf000, false)
+			py += 9
+		}
+	}
+}

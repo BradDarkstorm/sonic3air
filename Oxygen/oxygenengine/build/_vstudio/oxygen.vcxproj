@@ -128,6 +128,7 @@
     <ClCompile Include="..\..\source\oxygen\network\EngineServerClient.cpp" />
     <ClCompile Include="..\..\source\oxygen\network\netplay\ExternalAddressQuery.cpp" />
     <ClCompile Include="..\..\source\oxygen\network\netplay\NetplayClient.cpp" />
+    <ClCompile Include="..\..\source\oxygen\network\coopnet\CoopNet.cpp" />
     <ClCompile Include="..\..\source\oxygen\network\netplay\NetplayHost.cpp" />
     <ClCompile Include="..\..\source\oxygen\network\netplay\NetplayManager.cpp" />
     <ClCompile Include="..\..\source\oxygen\pch.cpp">
@@ -324,6 +325,7 @@
     <ClInclude Include="..\..\source\oxygen\network\EngineServerClient.h" />
     <ClInclude Include="..\..\source\oxygen\network\netplay\ExternalAddressQuery.h" />
     <ClInclude Include="..\..\source\oxygen\network\netplay\NetplayClient.h" />
+    <ClInclude Include="..\..\source\oxygen\network\coopnet\CoopNet.h" />
     <ClInclude Include="..\..\source\oxygen\network\netplay\NetplayHost.h" />
     <ClInclude Include="..\..\source\oxygen\network\netplay\NetplayManager.h" />
     <ClInclude Include="..\..\source\oxygen\network\netplay\NetplayPackets.h" />

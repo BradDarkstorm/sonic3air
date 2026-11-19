@@ -1,0 +1,39 @@
+{
+	"Metadata":
+	{
+		"Name": "Online Co-op",
+		"DisplayName": "Online Co-op",
+		"UniqueID": "s3air.online-coop",
+		"ModVersion": "0.1.0",
+		"Author": "",
+		"Description": "Online co-op for 2-8 players. Requires the Sonic 3 A.I.R. Co-op edition (engine with CoopNet). Set up host/join in coop.json next to the game. Everyone joins the host's stage and sees each other."
+	},
+
+	"Settings":
+	{
+		"Co-op":
+		[
+			{
+				"InternalName": "showNames",
+				"DisplayName": "Show Player Names",
+				"Variable": "Coop.setting.showNames",
+				"DefaultValue": "1",
+				"Options": { "0": "Off", "1": "On" }
+			},
+			{
+				"InternalName": "showOffscreen",
+				"DisplayName": "Show Off-screen Players",
+				"Variable": "Coop.setting.showOffscreen",
+				"DefaultValue": "1",
+				"Options": { "0": "Off", "1": "On" }
+			},
+			{
+				"InternalName": "playerOpacity",
+				"DisplayName": "Other Players",
+				"Variable": "Coop.setting.opacity",
+				"DefaultValue": "0",
+				"Options": { "0": "Solid", "1": "See-through" }
+			}
+		]
+	}
+}
