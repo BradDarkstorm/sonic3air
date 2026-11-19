@@ -3,7 +3,7 @@
 //-------------------------------------------------------//
 
 // Players must run exactly the same signature to join each other; bump on any protocol change
-constant string COOP_SIGNATURE = "s3air-online-coop/0.1.0"
+constant string COOP_SIGNATURE = "s3air-online-coop/0.3.0"
 
 // Mod settings (set by the game from mod.json "Settings")
 global u8 Coop.setting.showNames = 1
@@ -26,6 +26,8 @@ constant u8 COOP_MAX_PLAYERS = 8
 // Message types (first byte of every message)
 constant u8 MSG_PRESENCE	= 0x01		// Unreliable, ~30 times per second: own character state
 constant u8 MSG_STAGE		= 0x02		// Reliable, host only: the stage everyone should be in
+constant u8 MSG_SPRITES		= 0x03		// Unreliable, with each presence: the exact sprites drawn for the own character
+constant u8 MSG_PALETTE		= 0x04		// Unreliable, a few times per second: the own character's 32 palette colors
 // Reserved for upcoming features:
 //  0x10 = enemy destroyed, 0x20 = boss hit / boss state, 0x30 = special stage, 0x40 = teleport request
 
@@ -33,13 +35,23 @@ constant u8 MSG_STAGE		= 0x02		// Reliable, host only: the stage everyone should
 // Memory layout inside the engine's shared memory, using the otherwise unused top 64 KB (0x8f0000 .. 0x8fffff)
 constant u32 COOP_MEM_SEND		= 0x8f0000		// 0x100 bytes, outgoing message buffer
 constant u32 COOP_MEM_RECV		= 0x8f0100		// 0x400 bytes, incoming message buffer
-constant u32 COOP_MEM_PLAYERS	= 0x8f1000		// 0x40 bytes per remote player (8 players)
-constant u32 COOP_PLAYER_SIZE	= 0x40
+constant u32 COOP_MEM_SEND2		= 0x8f0600		// 0x200 bytes, outgoing buffer for sprite messages
+constant u32 COOP_MEM_PLAYERS	= 0x8f1000		// 0x200 bytes per remote player (8 players)
+constant u32 COOP_PLAYER_SIZE	= 0x200
 
 // Per remote player block at COOP_MEM_PLAYERS + id * COOP_PLAYER_SIZE:
 //  +0x00  u8   valid (1 if we got presence data recently)
 //  +0x02  u16  frames since last presence update
-//  +0x10  0x10 bytes: copy of the latest presence message (layout below)
+//  +0x04  u8   number of captured sprites at +0x80
+//  +0x05  u8   1 if palette at +0x40 is valid
+//  +0x06  u8   character the palette belongs to
+//  +0x10  PRESENCE_SIZE bytes: copy of the latest presence message (layout below)
+//  +0x40  0x40 bytes: the player's character palette (32 colors)
+//  +0x80  MAX_SPRITES * 0x20 bytes: captured sprites, layout as written by "Net.getCapturedSprites"
+constant u8 MAX_SPRITES = 12
+
+// Palette lines 10..15 (unused by the base game) are used for up to 3 remote players' own colors, filled from line 14+15 downwards
+constant u8  COOP_PALETTE_SLOTS = 3
 
 // Presence message layout (0x10 bytes):
 //  +0x00  u8   MSG_PRESENCE
@@ -54,7 +66,8 @@ constant u32 COOP_PLAYER_SIZE	= 0x40
 //  +0x0d  u8   Tails' tails animation sprite (0 = none)
 //  +0x0e  u8   Tails' tails angle
 //  +0x0f  u8   reserved
-constant u8 PRESENCE_SIZE = 0x10
+//  +0x10  u32  reserved
+constant u8 PRESENCE_SIZE = 0x14
 
 constant u8 PRESENCE_FLAG_FLIP_X		= 0x01
 constant u8 PRESENCE_FLAG_FLIP_Y		= 0x02

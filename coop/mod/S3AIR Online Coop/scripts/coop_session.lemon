@@ -8,7 +8,16 @@ global u8   Coop.lastNumPlayers
 global u16  Coop.statusTimer
 
 
+// The engine has a single post-update hook, which all mods share by overriding "PostFrameUpdate" and calling "base."
+//  -> So we do the same instead of adding our own hook function (which would replace or get replaced by others)
 //# post-update-hook
+function void PostFrameUpdate()
+{
+	base.PostFrameUpdate()
+	Coop.sessionUpdate()
+}
+
+
 function void Coop.sessionUpdate()
 {
 	// Start the session once, as configured in coop.json
@@ -58,6 +67,14 @@ function void Coop.processMessages()
 		else if (msgType == MSG_STAGE)
 		{
 			Coop.onStageMessage(sender, size)
+		}
+		else if (msgType == MSG_SPRITES)
+		{
+			Coop.onSpritesMessage(sender, size)
+		}
+		else if (msgType == MSG_PALETTE)
+		{
+			Coop.onPaletteMessage(sender, size)
 		}
 		// Unknown types are ignored, so newer hosts can add features without breaking older message handling
 	}

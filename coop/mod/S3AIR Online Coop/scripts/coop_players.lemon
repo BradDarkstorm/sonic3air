@@ -2,8 +2,17 @@
 // Online Co-op: see the other players                   //
 //-------------------------------------------------------//
 
+// How it works:
+//  - Each game records the exact sprites it drew for its own character this frame (engine "sprite capture",
+//    using the sprite tag the game sets to the object address before rendering it). That includes whatever
+//    character mods drew, no matter how they work internally.
+//  - These sprites (by their sprite key) plus the character's palette are sent to everyone.
+//  - Other games redraw exactly those sprites, using the sender's palette in a spare palette line.
+//    If a viewer doesn't have a sprite (e.g. doesn't have that character mod), it draws the original character instead.
+
 global u8   Coop.players.sendCounter
 global u32  Coop.players.tailsTailsAddress		// Cached address of player 1's Tails' tails object
+global bool Coop.players.captureActive
 
 
 function void Coop.playersUpdate()
@@ -13,6 +22,12 @@ function void Coop.playersUpdate()
 		// Forget everyone
 		for (u8 id = 0; id < COOP_MAX_PLAYERS; ++id)
 			u8[Coop.getPlayerBlock(id)] = 0
+		if (Coop.players.captureActive)
+		{
+			Net.setCaptureTag(0, 0)
+			Net.setCaptureTag(1, 0)
+			Coop.players.captureActive = false
+		}
 		return
 	}
 
@@ -31,13 +46,26 @@ function void Coop.playersUpdate()
 	if (!Coop.isInLevel())
 		return
 
-	// Send own state every 2nd frame (30 per second)
+	// Capture the sprites of the own character object, and of Tails' tails if there are any
+	Net.setCaptureTag(0, 0xffffb000)
+	A0 = 0xffffb000
+	u32 tailsAddress = (char.character == CHARACTER_TAILS) ? Coop.findTailsTails() : 0
+	Net.setCaptureTag(1, tailsAddress)
+	Coop.players.captureActive = true
+
+	// Send own state every 2nd frame (30 per second), palette every 8th frame
 	++Coop.players.sendCounter
 	if ((Coop.players.sendCounter & 1) == 0)
 	{
 		Coop.sendPresence()
+		Coop.sendSprites()
+	}
+	if ((Coop.players.sendCounter & 7) == 0)
+	{
+		Coop.sendPalette()
 	}
 
+	Coop.updateRemotePalettes()
 	Coop.drawRemotePlayers()
 }
 
@@ -75,7 +103,7 @@ function void Coop.sendPresence()
 		flags |= PRESENCE_FLAG_VISIBLE
 	u8[msg + 0x0c] = flags
 
-	// Tails' tails
+	// Tails' tails (only used for the fallback drawing)
 	u8[msg + 0x0d] = 0
 	u8[msg + 0x0e] = 0
 	if (char.character == CHARACTER_TAILS)
@@ -88,8 +116,33 @@ function void Coop.sendPresence()
 		}
 	}
 	u8[msg + 0x0f] = 0
+	u32[msg + 0x10] = 0
 
 	Net.send(NET_TARGET_ALL, msg, PRESENCE_SIZE, false)
+}
+
+
+function void Coop.sendSprites()
+{
+	u32 msg = COOP_MEM_SEND2
+	u8 count = Net.getCapturedSprites(msg + 4, MAX_SPRITES)
+	u8[msg + 0] = MSG_SPRITES
+	u8[msg + 1] = count
+	u16[msg + 2] = 0
+	Net.send(NET_TARGET_ALL, msg, 4 + u16(count) * 0x20, false)
+}
+
+
+function void Coop.sendPalette()
+{
+	A0 = 0xffffb000
+	u8 character = min(char.character, CHARACTER_KNUCKLES)
+	u32 msg = COOP_MEM_SEND
+	u8[msg + 0] = MSG_PALETTE
+	u8[msg + 1] = character
+	u16[msg + 2] = 0
+	copyMemory(msg + 4, 0x802000 + u32(character) * 0x40, 0x40)		// Character palette lines, as currently shown (incl. fading / Super flashing)
+	Net.send(NET_TARGET_ALL, msg, 0x44, false)
 }
 
 
@@ -119,14 +172,84 @@ function void Coop.onPresenceMessage(u8 sender, u16 size)
 		return
 
 	u32 block = Coop.getPlayerBlock(sender)
+	if (u8[block] == 0)
+	{
+		// New player: no sprites or palette yet
+		u8[block + 4] = 0
+		u8[block + 5] = 0
+	}
 	copyMemory(block + 0x10, COOP_MEM_RECV, PRESENCE_SIZE)
 	u8[block] = 1
 	u16[block + 2] = 0
 }
 
 
+function void Coop.onSpritesMessage(u8 sender, u16 size)
+{
+	if (size < 4 || sender >= COOP_MAX_PLAYERS || sender == Net.getLocalPlayerId())
+		return
+
+	u8 count = min(u8[COOP_MEM_RECV + 1], MAX_SPRITES)
+	if (size < 4 + u16(count) * 0x20)
+		return
+
+	u32 block = Coop.getPlayerBlock(sender)
+	copyMemory(block + 0x80, COOP_MEM_RECV + 4, u32(count) * 0x20)
+	u8[block + 4] = count
+}
+
+
+function void Coop.onPaletteMessage(u8 sender, u16 size)
+{
+	if (size < 0x44 || sender >= COOP_MAX_PLAYERS || sender == Net.getLocalPlayerId())
+		return
+
+	u32 block = Coop.getPlayerBlock(sender)
+	copyMemory(block + 0x40, COOP_MEM_RECV + 4, 0x40)
+	u8[block + 5] = 1
+	u8[block + 6] = u8[COOP_MEM_RECV + 1]
+}
+
+
+// Returns the palette slot (0..2) for a remote player, or 0xff if they don't get one
+function u8 Coop.getPaletteSlot(u8 playerId)
+{
+	u8 slot = 0
+	for (u8 id = 0; id < playerId; ++id)
+	{
+		u32 block = Coop.getPlayerBlock(id)
+		if (u8[block] != 0 && u8[block + 5] != 0)
+			++slot
+	}
+	return (slot < COOP_PALETTE_SLOTS) ? slot : 0xff
+}
+
+
+function void Coop.updateRemotePalettes()
+{
+	for (u8 id = 0; id < COOP_MAX_PLAYERS; ++id)
+	{
+		u32 block = Coop.getPlayerBlock(id)
+		if (u8[block] == 0 || u8[block + 5] == 0)
+			continue
+
+		u8 slot = Coop.getPaletteSlot(id)
+		if (slot == 0xff)
+			continue
+
+		// Palette lines 14+15, 12+13, 10+11 in the game's extended palette (normal and underwater variant),
+		// filled from the top as the lower ones are more likely to be used by other mods
+		copyMemory(0x802140 - u32(slot) * 0x40, block + 0x40, 0x40)
+		copyMemory(0x802440 - u32(slot) * 0x40, block + 0x40, 0x40)
+	}
+}
+
+
 function void Coop.drawRemotePlayers()
 {
+	// Make sure our own drawing of others doesn't get captured as part of our own character
+	Renderer.clearSpriteTag()
+
 	u16 ownStage = global.zone_act.apparent
 	bool ownActTrans = (global.zone_act != global.zone_act.apparent)
 	s32 screenWidth = getScreenWidth()
@@ -184,13 +307,13 @@ function void Coop.drawRemotePlayers()
 				py -= s32(level.height.bitmask) + 1
 		}
 
-		bool onScreen = (px > -32 && px < screenWidth + 32 && py > -32 && py < screenHeight + 32)
+		bool onScreen = (px > -48 && px < screenWidth + 48 && py > -48 && py < screenHeight + 48)
 		if (onScreen)
 		{
 			if (flags & PRESENCE_FLAG_VISIBLE)
 			{
 				u8 alpha = (Coop.setting.opacity == 1) ? 0xa0 : 0xff
-				Coop.drawPresenceSprite(data, px, py, alpha, 0x10000, 0x9f00 - u16(id) * 2)
+				Coop.drawRemotePlayer(id, px, py, alpha, 0x100)
 			}
 
 			if (Coop.setting.showNames)
@@ -217,18 +340,67 @@ function void Coop.drawRemotePlayers()
 				dx = dx * maxY / abs(dy)
 				dy = (dy > 0) ? maxY : -maxY
 			}
-			Coop.drawPresenceSprite(data, halfx + dx, halfy + dy, 0xc0, 0x8000, 0xa800)
+			Coop.drawRemotePlayer(id, halfx + dx, halfy + dy, 0xc0, 0x80)
 		}
 	}
 }
 
 
-// Draws a remote character from its presence data.
-// Goes through "Standalone.getModdedAnimationSpriteKey", so character mods that use the game's official hook
-// also show up for remote players -- as long as the viewer has that mod enabled too.
-function void Coop.drawPresenceSprite(u32 data, s32 px, s32 py, u8 alpha, s32 scale, u16 renderQueue)
+// Draws a remote player at screen position (px, py); scale is 8.8 fixed point (0x100 = normal size)
+function void Coop.drawRemotePlayer(u8 id, s32 px, s32 py, u8 alpha, s32 scale)
 {
+	u32 block = Coop.getPlayerBlock(id)
+	u32 data = block + 0x10
 	u8 character = u8[data + 0x01]
+
+	// Palette: sprites using the sender's character palette lines get redirected to that player's palette slot
+	u8 slot = (u8[block + 5] != 0) ? Coop.getPaletteSlot(id) : 0xff
+	u16 senderPaletteBase = 0x40 + u16(u8[block + 6]) * 0x20
+	u16 slotPaletteBase = (slot != 0xff) ? (0xe0 - u16(slot) * 0x20) : 0
+
+	// Replay the exact sprites the sender drew, if we have them
+	u8 count = u8[block + 4]
+	u8 drawn = 0
+	for (u8 i = 0; i < count; ++i)
+	{
+		u32 sprite = block + 0x80 + u32(i) * 0x20
+		u64 key = u64[sprite]
+		if (!Renderer.hasCustomSprite(key))
+			continue
+
+		u16 atex = u16[sprite + 0x0c]
+		if (slot != 0xff && atex >= senderPaletteBase && atex < senderPaletteBase + 0x20)
+			atex = slotPaletteBase + (atex - senderPaletteBase)
+
+		s32 dx = s32(s16[sprite + 0x08]) * scale / 0x100
+		s32 dy = s32(s16[sprite + 0x0a]) * scale / 0x100
+		s32 m11 = s32(s16[sprite + 0x12]) * scale
+		s32 m12 = s32(s16[sprite + 0x14]) * scale
+		s32 m21 = s32(s16[sprite + 0x16]) * scale
+		s32 m22 = s32(s16[sprite + 0x18]) * scale
+
+		u32 tint = u32[sprite + 0x1c]
+		tint = (tint & 0xffffff00) | ((tint & 0xff) * u32(alpha) / 0xff)
+		u16 renderQueue = (scale == 0x100) ? (u16[sprite + 0x10] - 1 - u16(id)) : (0xa800 + i)
+
+		Renderer.drawSpriteTransformed(key, px + dx, py + dy, atex, u8[sprite + 0x0e], renderQueue, tint, m11, m12, m21, m22)
+		++drawn
+	}
+
+	if (drawn == 0)
+	{
+		// Nothing usable received (or none of the sprites exist here): draw the original character instead
+		u16 atex = (slot != 0xff && u8[block + 6] == min(character, CHARACTER_KNUCKLES)) ? slotPaletteBase : (0x40 + u16(min(character, CHARACTER_KNUCKLES)) * 0x20)
+		u16 renderQueue = (scale == 0x100) ? (0x9f00 - u16(id) * 2) : 0xa800
+		Coop.drawOriginalCharacter(data, px, py, alpha, scale * 0x100, renderQueue, atex)
+	}
+}
+
+
+// Fallback: draws a remote character with its original sprites from the ROM, based on its presence data
+function void Coop.drawOriginalCharacter(u32 data, s32 px, s32 py, u8 alpha, s32 scale, u16 renderQueue, u16 atex)
+{
+	u8 character = min(u8[data + 0x01], CHARACTER_KNUCKLES)
 	u16 animationSpriteEx = u16[data + 0x08]
 	u8 animationSprite = u8[data + 0x0a]
 	u8 rotation = u8[data + 0x0b]
@@ -268,28 +440,23 @@ function void Coop.drawPresenceSprite(u32 data, s32 px, s32 py, u8 alpha, s32 sc
 	if (flags & PRESENCE_FLAG_PRIORITY)
 		spriteFlags |= SPRITE_FLAG_PRIO
 
-	// Find the sprite key: modded scripts first, then the same fallbacks the game uses
-	u64 key = Standalone.getModdedAnimationSpriteKey(character, animationSpriteEx)
-	if (key == 0 && animationSpriteEx >= 0x100)
+	// Original sprites only, built straight from the ROM, so the viewer's own character mods don't apply
+	u64 key = 0
+	if (animationSpriteEx >= 0x100 && character == CHARACTER_SONIC)
 	{
 		if (animationSpriteEx >= CHAR_ANIMSPRITE_SONIC_PEELOUT)
 			key = stringformat("sonic_peelout_%d", animationSpriteEx - CHAR_ANIMSPRITE_SONIC_PEELOUT)
 		else
 			key = stringformat("sonic_dropdash_%d", animationSpriteEx - CHAR_ANIMSPRITE_SONIC_DROPDASH)
 	}
-	if (key == 0)
+	else
 	{
-		key = stringformat(stringformat("%s_0x%02x", getCharacterSpriteKey(character, isSuper)), animationSprite)
-		if (!Renderer.hasCustomSprite(key) && character <= CHARACTER_KNUCKLES)
-		{
-			u32 sourceBase    = (character == CHARACTER_SONIC) ? ((animationSprite >= 0xda) ? 0x140060 : 0x100000) : (character == CHARACTER_TAILS) ? ((animationSprite >= 0xd1) ? 0x143d00 : 0x3200e0) : 0x1200e0
-			u32 tableAddress  = (character == CHARACTER_SONIC) ? (isSuper ? 0x148378 : 0x148182) : (character == CHARACTER_TAILS) ? 0x14a08a : 0x14bd0a
-			u32 mappingOffset = (character == CHARACTER_SONIC) ? (isSuper ? 0x146816 : 0x146620) : (character == CHARACTER_TAILS) ? 0x148eb8 : 0x14a8d6
-			key = Renderer.setupCustomCharacterSprite(sourceBase, tableAddress, mappingOffset, animationSprite, 0x00)
-		}
+		u32 sourceBase    = (character == CHARACTER_SONIC) ? ((animationSprite >= 0xda) ? 0x140060 : 0x100000) : (character == CHARACTER_TAILS) ? ((animationSprite >= 0xd1) ? 0x143d00 : 0x3200e0) : 0x1200e0
+		u32 tableAddress  = (character == CHARACTER_SONIC) ? (isSuper ? 0x148378 : 0x148182) : (character == CHARACTER_TAILS) ? 0x14a08a : 0x14bd0a
+		u32 mappingOffset = (character == CHARACTER_SONIC) ? (isSuper ? 0x146816 : 0x146620) : (character == CHARACTER_TAILS) ? 0x148eb8 : 0x14a8d6
+		key = Renderer.setupCustomCharacterSprite(sourceBase, tableAddress, mappingOffset, animationSprite, 0x00)
 	}
 
-	u8 atex = 0x40 + min(character, CHARACTER_KNUCKLES) * 0x20
 	u32 tint = 0xffffff00 | u32(alpha)		// RGBA
 
 	// Tails' tails go behind Tails
@@ -312,9 +479,7 @@ function void Coop.drawPresenceSprite(u32 data, s32 px, s32 py, u8 alpha, s32 sc
 		if (flags & PRESENCE_FLAG_PRIORITY)
 			tailsFlags |= SPRITE_FLAG_PRIO
 
-		u64 tailsKey = stringformat(stringformat("%s_tails_0x%02x", getCharacterSpriteKey(CHARACTER_TAILS, false)), tailsSprite)
-		if (!Renderer.hasCustomSprite(tailsKey))
-			tailsKey = Renderer.setupCustomCharacterSprite(0x336620, 0x344d74, 0x344bb8, tailsSprite, 0x00)
+		u64 tailsKey = Renderer.setupCustomCharacterSprite(0x336620, 0x344d74, 0x344bb8, tailsSprite, 0x00)
 		Renderer.drawCustomSprite(tailsKey, px, py, atex, tailsFlags, renderQueue - 1, tailsAngle, tint, scale)
 	}
 

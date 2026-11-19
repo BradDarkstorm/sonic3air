@@ -37,7 +37,10 @@ This is **phase 1** (the foundation). See "Roadmap" for what comes next.
 - Mod settings (Options → Mods → Online Co-op): player names, off-screen markers, solid or see-through players.
 
 ### Modded characters
-Other players are drawn through the game's own character-mod hook (`Standalone.getModdedAnimationSpriteKey`). If a character mod uses that hook and **you have the same mod enabled**, you'll see that player's modded character.
+Each game records the exact sprites it draws for its own character, plus that character's colours, and sends them to everyone. Other games redraw exactly those sprites. This works with any character mod, however it's built internally.
+- If **you have the same character mod installed** (it doesn't need to be the character you're playing), you see that player's modded character with their colours.
+- If you **don't** have it, you see the original character in its original colours.
+- Up to 3 other players get their own colours (spare palette lines 10–15). With more players, the extra ones use your game's colours for their character.
 
 ### Version check
 Everyone needs the same co-op mod version. If versions differ, the host turns the joining player away and their screen says why.
@@ -46,16 +49,15 @@ Everyone needs the same co-op mod version. If versions differ, the host turns th
 
 ## Building (no compiler needed on your PC)
 
-GitHub builds the game for you:
+GitHub builds the game for you. Each build downloads the **newest stable** Sonic 3 A.I.R. release from Eukaryot's repository and applies the co-op changes on top. Stable is what character mods are made for.
 
-1. Fork https://github.com/Eukaryot/sonic3air on GitHub.
-2. Add this project's files to your fork (see "Files" below). The easiest way is the GitHub website: **Add file → Upload files**, and drag the folders in.
-3. Open the **Actions** tab in your fork. If GitHub asks, click "I understand my workflows, go ahead and enable them".
-4. Pick **Build Co-op (Windows)** → **Run workflow**.
-5. When it finishes (about 30 min the first time, faster after that), download **Sonic3AIR-Coop-Windows** from the bottom of the run page. That zip is the game.
+1. Your GitHub repository needs just two things: the `coop` folder, and the workflow file at `.github/workflows/` (any name ending in `.yml`).
+2. Open the **Actions** tab. If GitHub asks, click "I understand my workflows, go ahead and enable them".
+3. Pick **Build Co-op (Windows)** → **Run workflow**. It also runs automatically whenever you change files in the repository.
+4. When it finishes (about 30 min the first time, faster after that), download **Sonic3AIR-Coop-Windows** from the bottom of the run page. That zip is the game. `GAME VERSION.txt` inside says which release it's built on.
 
 ### Updating to a new Sonic 3 A.I.R. version
-On your fork's GitHub page, click **Sync fork**, then run the workflow again. The engine changes only touch 2 lines in existing game files, so syncing almost never conflicts. If a game update changes something the mod relies on, only the mod's scripts need fixing.
+Just run the workflow again; it picks up the newest stable release by itself. If a game update moved one of the few spots the co-op changes hook into, the "Apply co-op changes" step fails and says exactly which file and spot. In **Run workflow** you can also type a specific version, like `v26.03.28.0-stable`, or `master` for the newest test version.
 
 ---
 
@@ -63,13 +65,11 @@ On your fork's GitHub page, click **Sync fork**, then run the workflow again. Th
 
 | Path | What it is |
 |---|---|
-| `Oxygen/oxygenengine/source/oxygen/network/coopnet/CoopNet.h/.cpp` | **New.** The networking layer. It has no Sonic-specific code; it just passes messages between players. |
-| `Oxygen/oxygenengine/source/oxygen/application/Application.cpp` | **2 lines added** (marked `// CoopNet addition`): keeps the connection running. |
-| `Oxygen/oxygenengine/source/oxygen/simulation/bindings/LemonScriptBindings.cpp` | **4 lines added**: lets mod scripts use the `Net.*` functions. |
-| `Oxygen/oxygenengine/build/_vstudio/oxygen.vcxproj` (+ `.filters`) | Adds the new files to the Windows build. |
-| `.github/workflows/build-coop-windows.yml` | The GitHub build. |
+| `coop/engine/CoopNet.h/.cpp` | The engine addition. It has no Sonic-specific code: it passes messages between players and can record which sprites were drawn for a given object. |
+| `coop/apply_coop.py` | Copies those files into the game source and adds a few marked lines (`// CoopNet addition`) to 4 existing engine files and the Visual Studio project. Each edit looks for a short piece of the original text, so it keeps working across game versions. |
 | `coop/mod/S3AIR Online Coop/` | The co-op script mod (all gameplay sync lives here). |
 | `coop/coop.json`, `coop/README.md` | Example config and this guide. |
+| `.github/workflows/build-coop-windows.yml` | The GitHub build. |
 
 ### `Net.*` functions available to scripts
 ```
@@ -82,6 +82,8 @@ Net.isPlayerConnected(u8) -> bool      Net.getPlayerName(u8) -> string
 Net.getStatusText() -> string
 Net.send(u8 target, u32 address, u16 bytes, bool reliable) -> bool      (target 0xff = everyone)
 Net.receive(u32 address, u16 maxBytes) -> u16 size (0 = nothing)      Net.getLastSender() -> u8
+Net.setCaptureTag(u8 index, u64 spriteTag)                              (index 0..3, tag 0 = off)
+Net.getCapturedSprites(u32 address, u8 maxCount) -> u8 count            (sprites drawn last frame with those tags, 0x20 bytes each)
 ```
 Player 0 is always the host. The host passes messages between joining players automatically.
 
@@ -91,7 +93,7 @@ Player 0 is always the host. The host passes messages between joining players au
 
 | Phase | Feature | Status |
 |---|---|---|
-| 1 | Host/join, everyone in the host's stage, seeing each other (including modded characters) | **Done** |
+| 1 | Host/join, everyone in the host's stage, seeing each other (including modded characters and their colours) | **Done** |
 | 2 | Enemy kills synced: an enemy one player kills is gone for everyone (by its level slot, not its position) | Next |
 | 2 | Teleport to another player from the pause menu | Next |
 | 3 | Boss health shared; the host keeps the real hit count | Planned |
@@ -100,7 +102,9 @@ Player 0 is always the host. The host passes messages between joining players au
 | 4 | Special stages: everyone enters together; a waiting screen until all finish; the emerald counts if **anyone** wins | Planned |
 | 5 | Tails can carry other players | Planned |
 
-## Testing status (phase 1)
-- The networking layer was tested over real UDP with 3 players: joining, player list, messages to everyone or to one player, passing messages through the host, version mismatch rejection, and players leaving. All passed.
-- The patched game builds and links. The co-op mod compiles in the game, and two game copies connect through `coop.json` (host log: "Player 2 'JoinKnux' joined", later "left").
-- **Not yet tested in a real level.** Drawing other players and following the host's stage need an actual playthrough with the ROM. Please report anything that looks off, such as players drawn in the wrong spot or wrong animation frames.
+## Testing status
+- **Networking:** tested over real UDP with 3 players: joining, player list, messages to everyone or to one player, the host passing messages along, version mismatch rejection, and players leaving. All passed.
+- **Builds:** the co-op changes apply to both stable 26.03.28.0 and the newest test version, and stable plus co-op builds and links.
+- **Mods together:** the co-op mod compiles and starts its connection alongside Reimu Rei-mu'd and Amy Galore Plus, in any load order. Two game copies connect.
+- **Played in a real level (version 0.1):** both players in the same stage, in the right positions, with the right animations.
+- **Not yet seen in a real level:** replaying modded character sprites and sending each player's colours (new in 0.3).
