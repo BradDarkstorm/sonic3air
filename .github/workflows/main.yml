@@ -1,0 +1,104 @@
+# Builds the Sonic 3 A.I.R. Online Co-op edition for Windows (64-bit).
+# Runs on GitHub's servers -- nothing needs to be installed on your PC.
+#
+# How to use:
+#   1. Push to your fork (or open the "Actions" tab -> "Build Co-op (Windows)" -> "Run workflow").
+#   2. Wait for the run to finish (first run takes roughly 20-30 minutes, it builds all libraries).
+#   3. Download the "Sonic3AIR-Coop-Windows" artifact at the bottom of the run page.
+
+name: Build Co-op (Windows)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ coop, main, master ]
+
+jobs:
+  build:
+    # windows-2022 ships Visual Studio 2022 (toolset v143), which the S3AIR projects expect.
+    # If GitHub ever retires this image, try "windows-latest" and see the note on PlatformToolset below.
+    runs-on: windows-2022
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Point the S3AIR build scripts at this machine's MSBuild
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $msbuild = & $vswhere -latest -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" | Select-Object -First 1
+          if (-not $msbuild) { throw "MSBuild not found" }
+          Write-Host "Using MSBuild: $msbuild"
+          Set-Content -Path framework/external/get_msbuild_path.bat -Encoding ascii -Value "@echo off`r`nset msbuildPath=`"$msbuild`"`r`n"
+          "MSBUILD=$msbuild" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Cache prebuilt external libraries
+        id: cache-externals
+        uses: actions/cache@v4
+        with:
+          path: framework/lib
+          key: externals-${{ runner.os }}-${{ hashFiles('framework/external/**/*.bat', 'framework/external/**/*.sln') }}
+
+      - name: Build external libraries (SDL, zlib, ogg/vorbis, curl, imgui)
+        if: steps.cache-externals.outputs.cache-hit != 'true'
+        shell: cmd
+        working-directory: framework/external
+        run: |
+          pushd sdl        && call build_sdl.bat no_pause        && popd
+          pushd zlib       && call build_zlib.bat no_pause       && popd
+          pushd ogg-vorbis && call build_ogg-vorbis.bat no_pause && popd
+          pushd curl       && call build_curl.bat no_pause       && popd
+          pushd imgui      && call build_imgui.bat no_pause      && popd
+          dir ..\lib\x64
+
+      - name: Build Sonic 3 A.I.R. (Release x64)
+        shell: pwsh
+        run: |
+          & "$env:MSBUILD" Oxygen/sonic3air/build/_vstudio/sonic3air.sln /m /p:Configuration=Release /p:Platform=x64 -verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { throw "Build failed" }
+
+      - name: Package game folder
+        shell: pwsh
+        run: |
+          $out = "package/Sonic3AIR-Coop"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+
+          $exe = Get-ChildItem -Recurse -Path Oxygen/sonic3air/bin -Filter Sonic3AIR.exe | Select-Object -First 1
+          if (-not $exe) { throw "Sonic3AIR.exe not found" }
+          Copy-Item $exe.FullName $out
+          Get-ChildItem -Path $exe.DirectoryName -Filter *.dll | Copy-Item -Destination $out
+
+          Copy-Item -Recurse Oxygen/sonic3air/data    "$out/data"
+          # The engine's own data (shaders, fonts, icon) normally comes from ../oxygenengine/data during development;
+          # merge it into the game's data folder so the package runs standalone (no files overlap)
+          robocopy Oxygen/oxygenengine/data "$out/data" /E /NFL /NDL /NJH /NJS
+          if ($LASTEXITCODE -ge 8) { throw "Copying engine data failed" }
+          $global:LASTEXITCODE = 0
+          Copy-Item -Recurse Oxygen/sonic3air/scripts "$out/scripts"
+          Copy-Item Oxygen/sonic3air/oxygenproject.json $out
+
+          # Player-friendly config: no developer shortcuts
+          $cfg = Get-Content Oxygen/sonic3air/config.json -Raw
+          $cfg = $cfg -replace '"EnforceDebugMode":\s*"1"', '"EnforceDebugMode": "0"'
+          $cfg = $cfg -replace '"SkipExitConfirmation":\s*"1"', '"SkipExitConfirmation": "0"'
+          $cfg = $cfg -replace '"LoadSaveState":\s*"[^"]*",?', ''
+          $cfg = $cfg -replace '"StartPhase":\s*"\d"', '"StartPhase": "1"'
+          Set-Content -Path "$out/config.json" -Value $cfg -Encoding utf8
+
+          # Portable save data: a local "savedata" folder makes this copy use its own saves, settings and mods,
+          # completely separate from a normal Sonic 3 A.I.R. install (which can't run the co-op mod)
+          New-Item -ItemType Directory -Force -Path "$out/savedata/mods" | Out-Null
+          Copy-Item -Recurse "coop/mod/S3AIR Online Coop" "$out/savedata/mods/"
+          Set-Content -Path "$out/savedata/mods/active-mods.json" -Value '{ "ActiveMods": [ "S3AIR Online Coop" ] }' -Encoding ascii
+
+          # Example network config + guide
+          Copy-Item coop/coop.json $out
+          Copy-Item coop/README.md "$out/CO-OP README.md"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Sonic3AIR-Coop-Windows
+          path: package/
